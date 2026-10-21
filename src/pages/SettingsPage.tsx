@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useFamilyStore } from '../store/familyStore';
 import { openDevtools, isTauri, selectFilePathForSaveZip, writeBinaryFile, getAppLogs, openUrl, selectProjectParentDir, moveProjectWorkspace, openInExplorer, webdavTest, webdavRemoteMeta, webdavListProjects, type RemoteSyncMeta, type RemoteProject } from '../utils/tauri';
-import { getDefaultSaveDir, setDefaultSaveDir } from '../utils/appPrefs';
+import { getDefaultSaveDir, setDefaultSaveDir, getTreeDisplayMode, setTreeDisplayMode, type TreeDisplayMode } from '../utils/appPrefs';
 import { exportProjectFile, countEmbeddedMedia, safeFolderName } from '../utils/projectPortable';
 import {
   getSyncSettings,
@@ -35,6 +35,13 @@ export default function SettingsPage() {
   const [defaultSaveDir, setDefaultSaveDirState] = useState<string>(() => getDefaultSaveDir());
   const [isMoving, setIsMoving] = useState(false);
   const [isExportingProject, setIsExportingProject] = useState(false);
+
+  // 家谱树显示模式（全局偏好）：classic=原版连线，enhanced=增强连线
+  const [treeDisplayMode, setTreeDisplayModeState] = useState<TreeDisplayMode>(() => getTreeDisplayMode());
+  const handleTreeModeChange = (mode: TreeDisplayMode) => {
+    setTreeDisplayModeState(mode);
+    setTreeDisplayMode(mode);
+  };
 
   // 多设备同步（WebDAV）
   const [sync, setSync] = useState<SyncSettings>(() => getSyncSettings());
@@ -680,6 +687,48 @@ export default function SettingsPage() {
               placeholder="请输入家谱名称"
               maxLength={50}
             />
+          </div>
+        </div>
+
+        {/* 家谱树显示模式 */}
+        <div className="settings-section">
+          <div className="settings-section-title">家谱树显示</div>
+          <p className="dev-tool-desc" style={{ marginBottom: '16px' }}>
+            选择家谱树亲子连线的显示方式。切换后回到家谱树页面即可生效，仅影响显示，不改动任何人物数据。
+          </p>
+
+          <div className="tree-mode-options">
+            <label className={`tree-mode-option${treeDisplayMode === 'classic' ? ' is-active' : ''}`}>
+              <input
+                type="radio"
+                name="treeDisplayMode"
+                value="classic"
+                checked={treeDisplayMode === 'classic'}
+                onChange={() => handleTreeModeChange('classic')}
+              />
+              <span className="tree-mode-text">
+                <span className="tree-mode-name">经典模式</span>
+                <span className="tree-mode-desc">
+                  原版连线：生父、生母各画一条完整连线，选中成员时在连线中点显示「生父 / 生母」称呼。
+                </span>
+              </span>
+            </label>
+
+            <label className={`tree-mode-option${treeDisplayMode === 'enhanced' ? ' is-active' : ''}`}>
+              <input
+                type="radio"
+                name="treeDisplayMode"
+                value="enhanced"
+                checked={treeDisplayMode === 'enhanced'}
+                onChange={() => handleTreeModeChange('enhanced')}
+              />
+              <span className="tree-mode-text">
+                <span className="tree-mode-name">增强模式</span>
+                <span className="tree-mode-desc">
+                  「生父 / 生母」称呼固定贴在对应家长卡片下方，子女再远也能一眼对上人；父母双方的横线只画一次，选中成员时不会出现虚线与虚线重叠补成的"假实线"。
+                </span>
+              </span>
+            </label>
           </div>
         </div>
 

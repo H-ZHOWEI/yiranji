@@ -44,9 +44,7 @@
 
 .password-status-bar {
   margin-bottom: var(--space-4);
-}
-
-.status-container {
+}.status-container {
   display: flex;
   align-items: center;
   gap: var(--space-4);
@@ -497,4 +495,56 @@
   .sync-two-col {
     grid-template-columns: 1fr;
   }
+}
+
+/* ===== 家谱树显示模式选择 ===== */
+.tree-mode-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.tree-mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.tree-mode-option:hover {
+  border-color: var(--color-border);
+}
+
+.tree-mode-option.is-active {
+  border-color: var(--color-primary);
+  background-color: var(--color-bg-card);
+}
+
+.tree-mode-option input[type='radio'] {
+  margin-top: 3px;
+  accent-color: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.tree-mode-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tree-mode-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.tree-mode-desc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary);
 }

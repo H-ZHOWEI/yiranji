@@ -38,6 +38,7 @@ import {
   type SiblingOrderMap,
 } from '../utils/siblingOrder';
 import { convertLocalSrc } from '../utils/tauri';
+import { getTreeDisplayMode, TREE_DISPLAY_MODE_EVENT, type TreeDisplayMode } from '../utils/appPrefs';
 import ImageViewer from '../components/ImageViewer';
 import { type Person, getAdoptiveFathers, getAdoptiveMothers } from '../types';
 import './TreePage.css';
@@ -615,6 +616,16 @@ function TreePageContent() {
   // 视图模式：true=显示默认算法布局，false=应用自定义布局
   const useDefaultLayoutRef = useRef(false);
 
+  // 家谱树亲子连线的显示模式（在"设置 → 家谱树显示"中切换）：
+  // classic = 原版连线（每条亲子连线各画完整 smoothstep）；enhanced = 增强模式
+  // （生父/生母称呼贴家长卡片、父母双方横杠只画一次）。默认 classic，保持与原版一致。
+  const [treeDisplayMode, setTreeDisplayModeState] = useState<TreeDisplayMode>(() => getTreeDisplayMode());
+  useEffect(() => {
+    const onModeChange = () => setTreeDisplayModeState(getTreeDisplayMode());
+    window.addEventListener(TREE_DISPLAY_MODE_EVENT, onModeChange);
+    return () => window.removeEventListener(TREE_DISPLAY_MODE_EVENT, onModeChange);
+  }, []);
+
   useEffect(() => {
     showCoordinatesRef.current = showCoordinates;
   }, [showCoordinates]);
@@ -1021,11 +1032,14 @@ function TreePageContent() {
 
     const graphEdges: Edge[] = [];
     const edgeSet = new Set<string>(); // 防止重复边
+    // 增强模式：生父/生母连线走 parentLabeled 自定义边（称呼贴家长卡片 + 横杠只画一次）；
+    // 经典模式：与原版完全一致，全部用原生 smoothstep 连线。
+    const enhancedEdges = treeDisplayMode === 'enhanced';
 
     personsList.forEach((person) => {
       // 亲子关系：生父、生母各自都与子女连线。
-      // 生父/生母的边统一用 parentLabeled 自定义边（几何与原生 smoothstep 完全相同），
-      // 唯一作用是把「生父 / 生母」称呼标签挂到自己那张家长卡片的下沿外侧——
+      // 增强模式下用 parentLabeled 自定义边（几何与原生 smoothstep 完全相同），
+      // 作用是把「生父 / 生母」称呼标签挂到自己那张家长卡片的下沿外侧——
       // 单亲家庭也一样贴家长，不会出现"标签飘在半路"的情况。
       if (person.relations.father) {
         const key = `${person.relations.father}->${person.id}`;
@@ -1039,8 +1053,8 @@ function TreePageContent() {
             target: person.id,
             sourceHandle: 'bottom',
             targetHandle: 'top',
-            type: 'parentLabeled',
-            data: hasBoth ? { otherParentId: person.relations.mother } : undefined,
+            type: enhancedEdges ? 'parentLabeled' : 'smoothstep',
+            data: enhancedEdges && hasBoth ? { otherParentId: person.relations.mother } : undefined,
             style: { stroke: '#b1b1b7', strokeWidth: 2 },
             animated: false,
           });
@@ -1057,8 +1071,8 @@ function TreePageContent() {
             target: person.id,
             sourceHandle: 'bottom',
             targetHandle: 'top',
-            type: 'parentLabeled',
-            data: hasBoth ? { otherParentId: person.relations.father } : undefined,
+            type: enhancedEdges ? 'parentLabeled' : 'smoothstep',
+            data: enhancedEdges && hasBoth ? { otherParentId: person.relations.father } : undefined,
             style: { stroke: '#b1b1b7', strokeWidth: 2 },
             animated: false,
           });
@@ -1621,7 +1635,7 @@ function TreePageContent() {
       return scoreA - scoreB;
     });
     setEdges(defaultSortedEdges);
-  }, [project?.persons, project?.meta.defaultPerspectiveId, project?.meta.siblingOrder, setNodes, setEdges, getNodes, handleHoverStart, handleHoverEnd]);
+  }, [project?.persons, project?.meta.defaultPerspectiveId, project?.meta.siblingOrder, setNodes, setEdges, getNodes, handleHoverStart, handleHoverEnd, treeDisplayMode]);
 
   useEffect(() => {
     buildGraph();
