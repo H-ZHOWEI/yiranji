@@ -3,6 +3,8 @@
 // 目前包含：
 // - defaultSaveDir：新建家谱档案时的默认父目录（用户可在"设置 → 档案存储"中修改）
 // - treeDisplayMode：家谱树亲子连线的显示模式（用户可在"设置 → 家谱树显示"中切换）
+// - devMode：开发者模式（连续点击"设置 → 关于"标题切换，控制「数据迁移」等
+//   开发者功能的显示；正常用户不可见）
 
 const PREFS_KEY = 'yiranji_app_prefs';
 
@@ -21,6 +23,8 @@ export interface AppPrefs {
   defaultSaveDir?: string;
   /** 家谱树显示模式；未设置视为 classic（与原版行为一致） */
   treeDisplayMode?: TreeDisplayMode;
+  /** 开发者模式；开启后设置页显示「数据迁移」等开发者功能 */
+  devMode?: boolean;
 }
 
 export function getAppPrefs(): AppPrefs {
@@ -82,4 +86,20 @@ export function setTreeDisplayMode(mode: TreeDisplayMode) {
   } catch {
     // 环境不支持 CustomEvent 时忽略（下次进入家谱树页面也会读到新值）
   }
+}
+
+/** 是否处于开发者模式（控制「数据迁移」等开发者功能的显示） */
+export function isDevMode(): boolean {
+  return getAppPrefs().devMode === true;
+}
+
+/** 开关开发者模式 */
+export function setDevMode(on: boolean) {
+  const prefs = getAppPrefs();
+  if (on) {
+    prefs.devMode = true;
+  } else {
+    delete prefs.devMode;
+  }
+  saveAppPrefs(prefs);
 }

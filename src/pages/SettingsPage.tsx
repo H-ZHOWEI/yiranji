@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useFamilyStore } from '../store/familyStore';
 import { openDevtools, isTauri, selectFilePathForSaveZip, writeBinaryFile, getAppLogs, openUrl, selectProjectParentDir, moveProjectWorkspace, openInExplorer, webdavTest, webdavRemoteMeta, webdavListProjects, type RemoteSyncMeta, type RemoteProject } from '../utils/tauri';
-import { getDefaultSaveDir, setDefaultSaveDir, getTreeDisplayMode, setTreeDisplayMode, type TreeDisplayMode } from '../utils/appPrefs';
+import { getDefaultSaveDir, setDefaultSaveDir, getTreeDisplayMode, setTreeDisplayMode, type TreeDisplayMode, isDevMode, setDevMode } from '../utils/appPrefs';
 import { exportProjectFile, countEmbeddedMedia, safeFolderName } from '../utils/projectPortable';
 import {
   getSyncSettings,
@@ -41,6 +41,30 @@ export default function SettingsPage() {
   const handleTreeModeChange = (mode: TreeDisplayMode) => {
     setTreeDisplayModeState(mode);
     setTreeDisplayMode(mode);
+  };
+
+  // 开发者模式（隐藏彩蛋）：在下方「关于」标题上连续快速点击 5 次切换。
+  // 开启后显示「数据迁移」等开发者专用功能，正常用户不可见。
+  const DEV_TAP_COUNT = 5;
+  const DEV_TAP_WINDOW_MS = 2000;
+  const [devMode, setDevModeState] = useState<boolean>(() => isDevMode());
+  const devTapCountRef = useRef(0);
+  const devTapLastAtRef = useRef(0);
+  const handleAboutTap = () => {
+    const now = Date.now();
+    // 点击间隔超过 2 秒视为重新开始计数
+    if (now - devTapLastAtRef.current > DEV_TAP_WINDOW_MS) devTapCountRef.current = 0;
+    devTapLastAtRef.current = now;
+    devTapCountRef.current += 1;
+    if (devTapCountRef.current < DEV_TAP_COUNT) return;
+    devTapCountRef.current = 0;
+    const next = !devMode;
+    setDevMode(next);
+    setDevModeState(next);
+    showToast(
+      next ? '🛠️ 已进入开发者模式，「数据迁移」功能已显示' : '已退出开发者模式',
+      'success'
+    );
   };
 
   // 多设备同步（WebDAV）
@@ -1039,7 +1063,8 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* 数据迁移（网页版 ⇄ 桌面版） */}
+        {/* 数据迁移（网页版 ⇄ 桌面版）—— 开发者模式才显示：在「关于」标题上连续点击 5 次切换 */}
+        {devMode && (
         <div className="settings-section">
           <div className="settings-section-title">数据迁移</div>
           <p className="dev-tool-desc" style={{ marginBottom: '16px' }}>
@@ -1067,6 +1092,7 @@ export default function SettingsPage() {
             </p>
           </div>
         </div>
+        )}
 
         {/* 安全与密码 */}
         <div className="settings-section">
@@ -1224,7 +1250,13 @@ export default function SettingsPage() {
 
         {/* 关于 */}
         <div className="settings-section">
-          <div className="settings-section-title">关于</div>
+          <div
+            className="settings-section-title"
+            onClick={handleAboutTap}
+            style={{ cursor: 'default', userSelect: 'none' }}
+          >
+            关于
+          </div>
           <div className="dev-tools-grid">
             <div className="dev-tool-item">
               <p className="dev-tool-label">当前版本</p>
