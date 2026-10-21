@@ -2,8 +2,10 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useFamilyStore } from '../store/familyStore';
 import { isTauri, openUrl } from '../utils/tauri';
+import { formatSyncTime, getSyncSettings } from '../utils/cloudSync';
+import type { RemoteSyncMeta } from '../utils/tauri';
 import { exportTreeImage, type RenderScale } from '../utils/imageExport';
-import { exportTreeHtml } from '../utils/htmlExport';
+import { exportTreeGraphHtml } from '../utils/htmlGraphExport';
 import { waitTreeCanvasReady } from '../utils/exportUtils';
 import MediaImportProgress from './MediaImportProgress';
 import SaveAsDialog, { type NotifyFn } from './SaveAsDialog';
@@ -19,8 +21,16 @@ export default function MainLayout() {
     saveCurrentProject,
     saveProjectAs,
     closeProject,
+    checkRemoteUpdate,
+    syncPullFromCloud,
+    quickSync,
   } = useFamilyStore();
   const navigate = useNavigate();
+
+  // 云端有更新时的顶部提示条
+  const [remoteBanner, setRemoteBanner] = useState<RemoteSyncMeta | null>(null);
+  const [pulling, setPulling] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   // 另存为弹窗与结果通知（toast）
   const [saveAsOpen, setSaveAsOpen] = useState(false);
@@ -43,6 +53,75 @@ export default function MainLayout() {
 
   const familyName = project?.meta.familyName || '家谱';
 
+  // 进入档案时检查云端是否有更新（仅开启云同步时执行，失败静默）
+  useEffect(() => {
+    let cancelled = false;
+    setRemoteBanner(null);
+    if (!project?.meta.syncKey || !currentFilePath) return;
+    const settings = getSyncSettings();
+    if (!settings.enabled || !settings.autoCheck) return;
+    (async () => {
+      try {
+        const meta = await checkRemoteUpdate();
+        if (!cancelled && meta) setRemoteBanner(meta);
+      } catch {
+        // 忽略：离线或服务不可用时不打扰
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.meta.syncKey, currentFilePath]);
+
+  const handlePullFromBanner = async () => {
+    setPulling(true);
+    try {
+      const report = await syncPullFromCloud();
+      setRemoteBanner(null);
+      setToast({
+        text: `已同步云端更新：新增媒体 ${report.downloadedMedia} 个${report.backupPath ? '，原档案已备份' : ''}`,
+        type: 'success',
+      });
+    } catch (err: any) {
+      setToast({ text: `拉取失败：${err?.message || err}`, type: 'error' });
+    } finally {
+      setPulling(false);
+    }
+  };
+
+  const handleQuickSync = async () => {
+    if (syncing) return;
+    const settings = getSyncSettings();
+    if (!settings.enabled || !settings.username.trim()) {
+      setToast({ text: '请先在「云同步设置」中填写 WebDAV 账号并启用同步', type: 'info' });
+      navigate('/settings#sync-section');
+      return;
+    }
+    setSyncing(true);
+    try {
+      const result = await quickSync();
+      if (result.action === 'pull') {
+        setRemoteBanner(null);
+        setToast({
+          text: `已同步云端最新版本（补齐媒体 ${result.downloadedMedia ?? 0} 个），原档案已备份`,
+          type: 'success',
+        });
+      } else if (result.action === 'push') {
+        setToast({
+          text: `已上传到云端：新增媒体 ${result.uploadedMedia ?? 0} 个、跳过已存在 ${result.skippedMedia ?? 0} 个`,
+          type: 'success',
+        });
+      } else {
+        setToast({ text: '两端内容一致，无需同步', type: 'info' });
+      }
+    } catch (err: any) {
+      setToast({ text: `同步失败：${err?.message || err}`, type: 'error' });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   // 若当前不在家谱树页面，先切换过去并等待画布挂载完成
   const ensureTreeCanvas = useCallback(async () => {
     if (!document.querySelector('.react-flow__viewport')) {
@@ -59,10 +138,10 @@ export default function MainLayout() {
     [ensureTreeCanvas, familyName]
   );
 
+  // HTML 图谱导出不依赖页面 DOM（自己算布局），因此无需先切到家谱树
   const handleExportHtml = useCallback(async () => {
-    await ensureTreeCanvas();
-    return exportTreeHtml(`${familyName}-家谱图.html`, `${familyName} · 家谱图`);
-  }, [ensureTreeCanvas, familyName]);
+    return exportTreeGraphHtml(`${familyName}-家谱图.html`, `${familyName} · 家谱图`);
+  }, [familyName]);
 
   if (!project) {
     navigate('/');
@@ -142,12 +221,26 @@ export default function MainLayout() {
             <span>保存档案</span>
           </button>
 
-          {isTauri() && (
-            <button className="sidebar-nav-item" onClick={handleSaveAs}>
-              <span className="nav-icon">📤</span>
-              <span>另存为...</span>
-            </button>
-          )}
+          {/* 另存为：桌面版弹原生保存对话框，网页版直接下载文件 */}
+          <button className="sidebar-nav-item" onClick={handleSaveAs}>
+            <span className="nav-icon">📤</span>
+            <span>另存为...</span>
+          </button>
+
+          <button
+            className="sidebar-nav-item"
+            onClick={handleQuickSync}
+            disabled={syncing || !currentFilePath}
+            title={currentFilePath ? '自动判断上传或拉取，保持两台电脑一致' : '请先保存档案到本地文件夹'}
+          >
+            <span className="nav-icon">{syncing ? '⏳' : '🔄'}</span>
+            <span>{syncing ? '同步中…' : '一键同步'}</span>
+          </button>
+
+          <button className="sidebar-nav-item" onClick={() => navigate('/settings#sync-section')}>
+            <span className="nav-icon">☁️</span>
+            <span>云同步设置{remoteBanner ? ' ●' : ''}</span>
+          </button>
 
           <button className="sidebar-nav-item" onClick={handleClose}>
             <span className="nav-icon">🏠</span>
@@ -179,6 +272,28 @@ export default function MainLayout() {
 
       {/* 主内容区 */}
       <main className="main-content">
+        {remoteBanner && (
+          <div className="sync-banner">
+            <span className="sync-banner-icon">☁️</span>
+            <div className="sync-banner-text">
+              云端有更新的版本（{formatSyncTime(remoteBanner.updatedAt)} 来自 {remoteBanner.device}）
+            </div>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={handlePullFromBanner}
+              disabled={pulling}
+            >
+              {pulling ? '⏳ 拉取中…' : '立即拉取'}
+            </button>
+            <button
+              className="sync-banner-close"
+              onClick={() => setRemoteBanner(null)}
+              aria-label="关闭"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         <Outlet />
       </main>
 

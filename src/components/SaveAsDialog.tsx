@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { RenderScale, ImageExportResult } from '../utils/imageExport';
+import { isTauri } from '../utils/tauri';
 
 // 以苒纪 — 另存为弹窗（左选格式，右看详情）
 //
@@ -31,9 +32,9 @@ const CATEGORY_OPTIONS: Array<{
   title: string;
   brief: string;
 }> = [
-  { id: 'yrj', icon: '🗂️', title: 'YRJ 档案', brief: '完整家谱档案' },
-  { id: 'image', icon: '🖼️', title: '图片', brief: 'JPG · PNG' },
-  { id: 'html', icon: '🌐', title: 'HTML 网页', brief: '矢量清晰可搜索' },
+  { id: 'yrj', icon: '🗂️', title: 'YRJ 档案', brief: '完整档案可再编辑' },
+  { id: 'image', icon: '🖼️', title: '图片', brief: 'PNG · JPG' },
+  { id: 'html', icon: '🌐', title: 'HTML 网页', brief: '可缩放 · 切换主视角' },
 ];
 
 const CATEGORY_DETAILS: Record<
@@ -42,7 +43,7 @@ const CATEGORY_DETAILS: Record<
 > = {
   yrj: {
     title: 'YRJ 档案',
-    desc: '打包全部人员信息与照片为单个加密档案文件，可再次打开编辑，适合长期保存与迁移。',
+    desc: '打包全部人员信息与照片为单个档案文件，可再次打开编辑，适合长期保存与迁移。档案设置了密码时会自动加密。',
   },
   image: {
     title: '图片',
@@ -50,13 +51,13 @@ const CATEGORY_DETAILS: Record<
   },
   html: {
     title: 'HTML 网页',
-    desc: '单文件网页，双击即可在浏览器打开。文字为矢量渲染，放大不模糊，可搜索可复制。',
+    desc: '单文件网页，双击即可在浏览器打开。只读不可编辑：可滚轮缩放、拖拽平移、悬浮卡片查看「我叫他 / 他叫我」双向称谓，还能在右上角切换主视角，适合发给亲友各自查看。',
   },
 };
 
-const IMAGE_FORMAT_INFO: Record<'jpg' | 'png', { label: string; desc: string }> = {
+const IMAGE_FORMAT_INFO: Record<'png' | 'jpg', { label: string; desc: string }> = {
+  png: { label: 'PNG', desc: '无损画质，文字与线条更锐利' },
   jpg: { label: 'JPG', desc: '智能压缩，体积小巧便于分享' },
-  png: { label: 'PNG', desc: '无损画质，细节完整不失真' },
 };
 
 const SCALE_OPTIONS: RenderScale[] = [1, 2, 3, 4];
@@ -71,7 +72,7 @@ export default function SaveAsDialog({
   notify,
 }: SaveAsDialogProps) {
   const [category, setCategory] = useState<ExportCategory>('yrj');
-  const [imageFormat, setImageFormat] = useState<'jpg' | 'png'>('jpg');
+  const [imageFormat, setImageFormat] = useState<'png' | 'jpg'>('png');
   const [renderScale, setRenderScale] = useState<RenderScale>(2);
   const [isExporting, setIsExporting] = useState(false);
 
@@ -79,7 +80,7 @@ export default function SaveAsDialog({
   useEffect(() => {
     if (open) {
       setCategory('yrj');
-      setImageFormat('jpg');
+      setImageFormat('png');
       setRenderScale(2);
       setIsExporting(false);
     }
@@ -164,13 +165,18 @@ export default function SaveAsDialog({
             <div className="saveas-detail-header">
               <div className="saveas-detail-title">{detail.title}</div>
               <div className="saveas-detail-desc">{detail.desc}</div>
+              {!isTauri() && (
+                <div className="saveas-web-hint">
+                  浏览器模式：点击保存后会下载到系统的「下载」文件夹。
+                </div>
+              )}
             </div>
 
             {isImage && (
               <>
                 {/* 图片格式子选项：JPG / PNG */}
                 <div className="saveas-image-formats">
-                  {(['jpg', 'png'] as const).map((f) => (
+                  {(['png', 'jpg'] as const).map((f) => (
                     <button
                       key={f}
                       type="button"

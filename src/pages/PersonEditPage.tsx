@@ -19,7 +19,7 @@ import { getAdoptiveFathers, getAdoptiveMothers } from '../types';
 import './PersonEditPage.css';
 
 // 生卒日期允许的最早年份
-const MIN_YEAR = 1900;
+const MIN_YEAR = 1800;
 
 // 日期上限相对“今天”的容差（天）：留一点余量，避免用户时钟有少许偏差时被误伤
 const DATE_LIMIT_TOLERANCE_DAYS = 3;
@@ -131,6 +131,9 @@ export default function PersonEditPage() {
 
   // 日期录入 Tab 模式：'solar' (公历录入) | 'lunar' (农历录入)
   const [birthInputMode, setBirthInputMode] = useState<'solar' | 'lunar'>('solar');
+
+  // 出生日期未知：更早的祖宗往往没有确切出生日期，勾选后不保存任何出生日期
+  const [birthUnknown, setBirthUnknown] = useState(false);
 
   // 生日：公历状态 (数字)
   const [sBirthYear, setSBirthYear] = useState<number>(1990);
@@ -382,6 +385,9 @@ export default function PersonEditPage() {
 
       setSiblingIds(currentSiblings);
 
+      // 出生日期未知标记：历史数据本就没有出生日期，避免被默认年份污染
+      setBirthUnknown(!existingPerson.birthDateSolar);
+
       // 回填公历生日数字
       if (existingPerson.birthDateSolar) {
         const date = new Date(existingPerson.birthDateSolar);
@@ -414,6 +420,7 @@ export default function PersonEditPage() {
       }
     } else {
       // 默认推算
+      setBirthUnknown(false);
       handleSolarChange(1990, 1, 1);
     }
   }, [existingPerson, handleSolarChange]);
@@ -808,9 +815,10 @@ export default function PersonEditPage() {
       surname,
       givenName,
       gender,
-      birthDateSolar,
-      birthTimePrecision: isBirthTimeProvided ? 'time' : 'date',
-      birthDateLunar,
+      // 出生日期未知时不保存任何出生信息，避免伪造年份污染数据
+      birthDateSolar: birthUnknown ? undefined : birthDateSolar,
+      birthTimePrecision: birthUnknown ? 'date' : (isBirthTimeProvided ? 'time' : 'date'),
+      birthDateLunar: birthUnknown ? undefined : birthDateLunar,
       deathDateSolar,
       deathTimePrecision,
       isAlive,
@@ -962,7 +970,9 @@ export default function PersonEditPage() {
     navigate(`/person/${currentPersonId}`);
   };
 
-  const calculatedBirthSolarStr = `${String(sBirthYear).padStart(4, '0')}-${String(sBirthMonth).padStart(2, '0')}-${String(sBirthDay).padStart(2, '0')}`;
+  const calculatedBirthSolarStr = birthUnknown
+    ? ''
+    : `${String(sBirthYear).padStart(4, '0')}-${String(sBirthMonth).padStart(2, '0')}-${String(sBirthDay).padStart(2, '0')}`;
   const photoAgeText = calculatedBirthSolarStr && avatarPhotoDate
     ? calculatePhotoAge(calculatedBirthSolarStr, avatarPhotoDate)
     : null;
@@ -1288,6 +1298,26 @@ export default function PersonEditPage() {
         <div className="form-section-title">生卒信息</div>
 
         <div className="form-group">
+          {/* 出生日期未知开关 */}
+          <div style={{ marginBottom: '12px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={birthUnknown}
+                onChange={(e) => setBirthUnknown(e.target.checked)}
+                style={{ width: '18px', height: '18px', accentColor: 'var(--color-accent)' }}
+              />
+              <span style={{ fontSize: '15px', fontWeight: '500' }}>出生日期未知</span>
+            </label>
+            {birthUnknown && (
+              <div style={{ marginTop: '6px', fontSize: '13px', color: 'var(--color-text-tertiary)' }}>
+                适合年代久远、无法确定出生日期的祖宗。勾选后将不保存出生日期，家谱卡片仅显示性别。
+              </div>
+            )}
+          </div>
+
+          {!birthUnknown && (
+          <>
           <div className="birth-mode-tabs" style={{ display: 'flex', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', overflow: 'hidden', marginBottom: '16px' }}>
             <button
               type="button"
@@ -1523,6 +1553,8 @@ export default function PersonEditPage() {
               </div>
             )}
           </div>
+          </>
+          )}
         </div>
 
         {/* 存活状态 */}
@@ -2184,12 +2216,12 @@ export default function PersonEditPage() {
           <div className="custom-dialog-box" onClick={(e) => e.stopPropagation()}>
             <div className="custom-dialog-header">
               <span className="custom-dialog-icon">📌</span>
-              <span className="custom-dialog-title">默认视角确认</span>
+              <span className="custom-dialog-title">主视角确认</span>
             </div>
             <div className="custom-dialog-message">
-              这是本家谱中创建的第一个人员，将被设置为<strong>默认视角</strong>。
+              这是本家谱中创建的第一个人员，将被设置为<strong>主视角</strong>。
               <br />
-              后续所有人员关系（辈分、代际层级等）都将以该人员为基准进行计算与展示，请悉知。
+              后续所有人员关系（辈分、代际层级等）都将以该人员为基准进行计算与展示，之后可在「家谱树 → 主视角」中随时切换。
             </div>
             <div className="custom-dialog-buttons">
               <button className="btn btn-secondary btn-sm" onClick={() => { setShowFirstPersonDialog(false); navigate(-1); }}>

@@ -3,12 +3,15 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useFamilyStore } from '../store/familyStore';
 import { getFullName, getLifeSpan, getAgeDescription } from '../utils';
 import { convertLocalSrc } from '../utils/tauri';
+import ImageViewer from '../components/ImageViewer';
 import './PersonsPage.css';
 
 export default function PersonsPage() {
   const navigate = useNavigate();
   const { getPersonsList } = useFamilyStore();
   const [search, setSearch] = useState('');
+  // 头像大图查看
+  const [avatarViewer, setAvatarViewer] = useState<{ src: string; caption: string } | null>(null);
 
   const persons = getPersonsList();
   const filtered = persons.filter((p) => {
@@ -42,7 +45,19 @@ export default function PersonsPage() {
             to={`/person/${person.id}`}
             className={`person-card ${person.isDefaultPerspective ? 'perspective' : ''}`}
           >
-            <div className="person-card-avatar">
+            <div
+              className={`person-card-avatar${person.avatar ? ' clickable' : ''}`}
+              title={person.avatar ? '点击查看头像大图' : undefined}
+              onClick={(e) => {
+                if (!person.avatar) return;
+                e.preventDefault();
+                e.stopPropagation();
+                setAvatarViewer({
+                  src: convertLocalSrc(person.avatar),
+                  caption: getFullName(person.surname, person.givenName) || '头像',
+                });
+              }}
+            >
               {person.avatar ? (
                 <img src={convertLocalSrc(person.avatar)} alt="" />
               ) : (
@@ -59,7 +74,7 @@ export default function PersonsPage() {
             </div>
             {person.isDefaultPerspective && (
               <div className="person-card-badge">
-                <span className="badge badge-accent">默认视角</span>
+                <span className="badge badge-accent">主视角</span>
               </div>
             )}
           </Link>
@@ -81,6 +96,14 @@ export default function PersonsPage() {
           <div className="empty-state-title">未找到匹配的人员</div>
           <div className="empty-state-desc">尝试使用其他关键词搜索</div>
         </div>
+      )}
+
+      {avatarViewer && (
+        <ImageViewer
+          images={[avatarViewer]}
+          title="头像"
+          onClose={() => setAvatarViewer(null)}
+        />
       )}
     </div>
   );

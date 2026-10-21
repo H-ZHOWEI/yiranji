@@ -144,3 +144,16 @@
 .person-card-add .add-icon {
   font-size: 2rem;
 }
+
+/* 头像可点击查看大图 */
+.person-card-avatar.clickable {
+  cursor: zoom-in;
+}
+
+.person-card-avatar.clickable:hover img {
+  transform: scale(1.06);
+}
+
+.person-card-avatar img {
+  transition: transform 0.2s ease;
+}

@@ -304,3 +304,197 @@
   font-size: var(--text-xs);
   color: var(--color-danger, #ef4444);
 }
+
+/* ==================== 档案存储：路径展示 ==================== */
+.path-display {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-input);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  word-break: break-all;
+  user-select: text;
+}
+
+.path-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+
+/* ==================== 多设备同步 ==================== */
+
+.sync-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.sync-preset-label {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.sync-preset-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background-color: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.sync-preset-btn:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent-light);
+}
+
+.sync-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.sync-status-card {
+  margin: 4px 0 14px;
+  padding: 12px 14px;
+  background-color: var(--color-bg-input);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+}
+
+.sync-status-line {
+  display: flex;
+  gap: 12px;
+  font-size: 12.5px;
+  line-height: 1.9;
+}
+
+.sync-status-key {
+  flex: none;
+  width: 64px;
+  color: var(--color-text-tertiary);
+}
+
+.sync-status-value {
+  color: var(--color-text-primary);
+  word-break: break-all;
+}
+
+.sync-status-warn {
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-warning, #c2752e);
+}
+
+.sync-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sync-options {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.sync-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.sync-check input {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* ---- 换电脑 / 从云端恢复 ---- */
+.sync-restore {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--color-border-light);
+}
+
+.sync-restore-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sync-restore-head strong {
+  display: block;
+  font-size: 13.5px;
+  color: var(--color-text-primary);
+  margin-bottom: 4px;
+}
+
+.sync-restore-head span {
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+
+.sync-restore-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sync-restore-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-secondary);
+}
+
+.sync-restore-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sync-restore-info strong {
+  font-size: 13.5px;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-restore-info span {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+@media (max-width: 720px) {
+  .sync-two-col {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,5 +1,6 @@
 use std::io::{Cursor, Write};
 use std::fs;
+use std::path::PathBuf;
 use rand::RngCore;
 use pbkdf2::pbkdf2;
 use sha2::Sha256;
@@ -38,15 +39,28 @@ pub fn zip_workspace(workspace_path: &str) -> Result<Vec<u8>, String> {
             zip.write_all(&json_data).map_err(|e| e.to_string())?;
         }
 
-        // 2. 压入 media 目录下的全部照片文件
-        let media_dir = format!("{}/media", workspace_path);
-        if std::path::Path::new(&media_dir).exists() {
-            for entry in fs::read_dir(&media_dir).map_err(|e| format!("遍历 media 失败: {}", e))? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                let path = entry.path();
-                if path.is_file() {
-                    let file_name = path.file_name().unwrap().to_string_lossy();
-                    let archive_name = format!("media/{}", file_name);
+        // 2. 压入 media 目录下的全部媒体文件（递归，含 avatar_xxx/ 这类子目录）
+        let media_dir = PathBuf::from(format!("{}/media", workspace_path));
+        if media_dir.is_dir() {
+            let mut stack = vec![media_dir.clone()];
+            while let Some(dir) = stack.pop() {
+                for entry in fs::read_dir(&dir).map_err(|e| format!("遍历 media 失败: {}", e))? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    if !path.is_file() {
+                        continue;
+                    }
+                    // 保留相对 media 的目录层级，解包后才能还原 media/avatar_xxx/cropped.jpg
+                    let rel = path
+                        .strip_prefix(&media_dir)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let archive_name = format!("media/{}", rel);
                     let file_data = fs::read(&path).map_err(|e| format!("读取媒体文件失败: {}", e))?;
                     zip.start_file(&archive_name, options).map_err(|e| e.to_string())?;
                     zip.write_all(&file_data).map_err(|e| e.to_string())?;
@@ -177,4 +191,66 @@ pub fn deserialize_yrj_workspace(data: &[u8], dest_workspace: &str, password: Op
     };
 
     unzip_to_workspace(&zip_payload, dest_workspace)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("yiranji-yrj-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn prepare_workspace(tag: &str) -> PathBuf {
+        let dir = temp_dir(tag);
+        fs::create_dir_all(dir.join("media").join("avatar_1")).unwrap();
+        fs::write(dir.join("project.json"), "{\"meta\":{},\"persons\":{}}").unwrap();
+        fs::write(dir.join("media").join("photo_a.jpg"), vec![1u8; 10]).unwrap();
+        fs::write(dir.join("media").join("avatar_1").join("cropped.jpg"), vec![2u8; 20]).unwrap();
+        fs::write(dir.join("media").join("avatar_1").join("original.jpg"), vec![3u8; 30]).unwrap();
+        dir
+    }
+
+    fn assert_restored(dest: &PathBuf) {
+        assert!(dest.join("project.json").is_file(), "project.json 应被还原");
+        assert!(dest.join("media").join("photo_a.jpg").is_file(), "顶层照片应被还原");
+        assert!(
+            dest.join("media").join("avatar_1").join("cropped.jpg").is_file(),
+            "子目录头像应被还原"
+        );
+        assert!(
+            dest.join("media").join("avatar_1").join("original.jpg").is_file(),
+            "子目录原图应被还原"
+        );
+        assert_eq!(
+            fs::metadata(dest.join("media").join("avatar_1").join("cropped.jpg"))
+                .unwrap()
+                .len(),
+            20,
+            "还原的文件内容应一致"
+        );
+    }
+
+    #[test]
+    fn yrj_roundtrip_keeps_nested_media() {
+        let src = prepare_workspace("plain-src");
+        let data = serialize_yrj_workspace(src.to_str().unwrap(), None).unwrap();
+        let dest = temp_dir("plain-dest");
+        deserialize_yrj_workspace(&data, dest.to_str().unwrap(), None).unwrap();
+        assert_restored(&dest);
+    }
+
+    #[test]
+    fn yrj_roundtrip_encrypted_keeps_nested_media() {
+        let src = prepare_workspace("enc-src");
+        let data =
+            serialize_yrj_workspace(src.to_str().unwrap(), Some("p@ssw0rd".into())).unwrap();
+        let dest = temp_dir("enc-dest");
+        deserialize_yrj_workspace(&data, dest.to_str().unwrap(), Some("p@ssw0rd".into())).unwrap();
+        assert_restored(&dest);
+    }
 }

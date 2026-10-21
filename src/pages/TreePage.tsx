@@ -9,6 +9,12 @@ import {
   type Node,
   type Edge,
   type NodeTypes,
+  type EdgeTypes,
+  type EdgeProps,
+  BaseEdge,
+  EdgeLabelRenderer,
+  getSmoothStepPath,
+  useStore,
   Handle,
   Position,
   Background,
@@ -22,8 +28,17 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { useFamilyStore } from '../store/familyStore';
-import { getFullName, getLifeSpan, formatAge, getRelationshipText } from '../utils';
+import { getFullName, getLifeSpan, formatAge, getRelationshipText, findKinshipPath, findPathEdgeIds } from '../utils';
+import {
+  sortSiblings,
+  parentIdsOf,
+  applyGroupOrder,
+  clearGroupOrder,
+  hasManualOrder,
+  type SiblingOrderMap,
+} from '../utils/siblingOrder';
 import { convertLocalSrc } from '../utils/tauri';
+import ImageViewer from '../components/ImageViewer';
 import { type Person, getAdoptiveFathers, getAdoptiveMothers } from '../types';
 import './TreePage.css';
 
@@ -34,22 +49,86 @@ const ENTRY_FOCUS_DURATION_MS = 850;  // 聚焦到主视角人物的过渡时长
 const ENTRY_FOCUS_ZOOM = 1.2;         // 聚焦目标缩放（1.0 即 1:1，大于 1 会更放大）
 const ENTRY_FOCUS_MAX_ZOOM = 1.2;     // 聚焦缩放的硬上限（绝对值还受 ReactFlow 的 maxZoom=2 约束）
 
+// ==================== 视口位置记忆 ====================
+// 规则：本次运行（打开软件）内，每个家谱项目"第一次"进入家谱树时，自动定位到主视角；
+// 之后再进入该项目的家谱树，恢复到上次离开时停留的位置（平移 + 缩放）。
+const VIEWPORT_STORAGE_PREFIX = 'yiranji_tree_viewport_';
+
+interface SavedViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+/** 本次运行内已经自动定位过主视角的项目集合（刷新/重启软件后自然清空） */
+const autoFocusedProjectIds = new Set<string>();
+
+function viewportStorageKey(projectId: string | null): string {
+  return VIEWPORT_STORAGE_PREFIX + (projectId || 'default');
+}
+
+function readSavedViewport(projectId: string | null): SavedViewport | null {
+  try {
+    const raw = localStorage.getItem(viewportStorageKey(projectId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SavedViewport;
+    if (
+      !parsed ||
+      !Number.isFinite(parsed.x) ||
+      !Number.isFinite(parsed.y) ||
+      !Number.isFinite(parsed.zoom) ||
+      parsed.zoom <= 0
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeSavedViewport(projectId: string | null, viewport: SavedViewport) {
+  if (!Number.isFinite(viewport.x) || !Number.isFinite(viewport.y) || !Number.isFinite(viewport.zoom)) return;
+  try {
+    localStorage.setItem(viewportStorageKey(projectId), JSON.stringify(viewport));
+  } catch {
+    // 存储不可用时静默失败，不影响使用
+  }
+}
+
 // ==================== 自定义节点组件 ====================
 
 interface PersonNodeData {
   person: Person;
   isPerspective: boolean;
   showCoordinates?: boolean;
+  onHoverStart?: (personId: string) => void;
+  onHoverEnd?: () => void;
 }
 
 function PersonNode({ data }: { data: PersonNodeData }) {
-  const { person, isPerspective, showCoordinates } = data;
+  const { person, isPerspective, showCoordinates, onHoverStart, onHoverEnd } = data;
   const navigate = useNavigate();
   const project = useFamilyStore((state) => state.project);
   const isAnonymized = useFamilyStore((state) => state.isAnonymized);
   const anonymizedNames = useFamilyStore((state) => state.anonymizedNames);
   const perspectiveId = project?.meta.defaultPerspectiveId;
-  const relationText = getRelationshipText(person.id, perspectiveId, project?.persons || {});
+  const personsMap = project?.persons || {};
+  const relationText = getRelationshipText(
+    person.id,
+    perspectiveId,
+    personsMap,
+    project?.meta.siblingOrder
+  );
+  // 反向称谓：主视角该叫此人什么（用于"他叫我 X"）
+  const isPerspectiveSelf = !!perspectiveId && person.id === perspectiveId;
+  const reverseRelationText =
+    !isPerspectiveSelf && perspectiveId
+      ? getRelationshipText(perspectiveId, person.id, personsMap, project?.meta.siblingOrder)
+      : '';
+  const selfPronoun = person.gender === 'male' ? '他' : '她';
+  const perspectivePronoun =
+    perspectiveId && personsMap[perspectiveId]?.gender === 'male' ? '他' : '她';
 
   // 使用 useReactFlow 更新自身节点坐标
   const { setNodes } = useReactFlow();
@@ -63,6 +142,8 @@ function PersonNode({ data }: { data: PersonNodeData }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editX, setEditX] = useState('');
   const [editY, setEditY] = useState('');
+  // 头像大图查看
+  const [avatarViewerOpen, setAvatarViewerOpen] = useState(false);
 
   // 节点被拖拽时，若非编辑态，则自动更新输入框中的预设值
   useEffect(() => {
@@ -142,6 +223,8 @@ function PersonNode({ data }: { data: PersonNodeData }) {
     <div
       className={`tree-person-node ${person.gender} ${isPerspective ? 'perspective' : ''}`}
       onDoubleClick={() => navigate(`/person/${person.id}`)}
+      onMouseEnter={() => onHoverStart?.(person.id)}
+      onMouseLeave={() => onHoverEnd?.()}
     >
       <Handle type="target" position={Position.Top} id="top" style={{ opacity: 0 }} />
 
@@ -149,10 +232,23 @@ function PersonNode({ data }: { data: PersonNodeData }) {
         <div className="tree-node-perspective-tag">★</div>
       )}
 
-      {/* 悬停关系气泡 */}
+      {/* 悬停关系气泡：我叫他什么 + 他叫我什么 */}
       {relationText && (
         <div className="tree-node-relation-badge">
-          {relationText}
+          {isPerspectiveSelf ? (
+            <span className="tree-node-relation-line">★ 当前主视角</span>
+          ) : (
+            <>
+              <span className="tree-node-relation-line">
+                我叫{selfPronoun}：{relationText}
+              </span>
+              {reverseRelationText && (
+                <span className="tree-node-relation-line tree-node-relation-back">
+                  {perspectivePronoun}叫我：{reverseRelationText}
+                </span>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -162,7 +258,16 @@ function PersonNode({ data }: { data: PersonNodeData }) {
       <Handle type="source" position={Position.Left} id="left-source" style={{ opacity: 0 }} />
       <Handle type="target" position={Position.Left} id="left-target" style={{ opacity: 0 }} />
 
-      <div className="tree-node-avatar">
+      <div
+        className={`tree-node-avatar${person.avatar ? ' clickable' : ''}`}
+        title={person.avatar ? '点击查看头像大图' : undefined}
+        onClick={(e) => {
+          if (!person.avatar) return;
+          e.stopPropagation();
+          setAvatarViewerOpen(true);
+        }}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
         {person.avatar ? (
           <img src={convertLocalSrc(person.avatar)} alt={fullName} />
         ) : (
@@ -217,6 +322,21 @@ function PersonNode({ data }: { data: PersonNodeData }) {
       )}
 
       <Handle type="source" position={Position.Bottom} id="bottom" style={{ opacity: 0 }} />
+
+      {avatarViewerOpen && person.avatar && (
+        <ImageViewer
+          images={[
+            {
+              src: convertLocalSrc(person.avatar),
+              caption: `${fullName} · 头像`,
+              meta: person.birthDateSolar ? `生于 ${person.birthDateSolar.slice(0, 10)}` : '',
+              alt: fullName,
+            },
+          ]}
+          title="头像"
+          onClose={() => setAvatarViewerOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -224,19 +344,181 @@ function PersonNode({ data }: { data: PersonNodeData }) {
 const nodeTypes: NodeTypes = {
   person: PersonNode as any,
 };
-// 递归判断某个节点是否是 targetId (默认主视角) 的直系祖先（即 targetId 是该节点的子嗣/子孙）
-const isPerspectiveDescendant = (
-  startPersonId: string,
-  targetId: string,
-  personsMap: Record<string, Person>
-): boolean => {
-  if (startPersonId === targetId) return true;
-  const person = personsMap[startPersonId];
-  if (!person) return false;
 
-  const children = person.relations.children || [];
-  return children.some(child => isPerspectiveDescendant(child.id, targetId, personsMap));
+/**
+ * 亲子连线（生父/生母 → 子女）的连线几何与称呼标签：
+ *
+ * 【连线几何：横杠只画一次，杜绝"假实线"】
+ * 原生做法是生父、生母各画一条完整 smoothstep（自己竖线 → 横线 → 子女竖线），
+ * 两条横线在同一高度大面积重叠；高亮时两条都是虚线动画（dasharray 8），
+ * dash 相位相差家长间距，错开半周期就互补成一条"实线"——这就是假实线的来源。
+ * 现改为横杠模型：
+ * - junction（离子女更近的家长）画完整路径：自己竖线 → 横线 → 子女竖线；
+ * - 远端家长只画：自己竖线 → 横线（到 junction 竖线处截断）。
+ * 两段首尾相接、零重叠，任何状态下都只呈现一条线。
+ *
+ * 【标签：贴家长卡片】
+ * 「生父 / 生母」称呼固定挂在自己这张家长卡片下沿外侧（先看到称谓、再看到卡片），
+ * 与子女距离无关，子女再远标签也不会飘到线中途。
+ */
+
+/**
+ * 按原生 getSmoothStepPath（bottom→top、默认 offset=20 / borderRadius=5）的规则
+ * 构造亲子路径；cutX 非空时在横线段的 cutX 处截断（远端家长边只画到 junction 竖线）。
+ * 子女不在家长下方等异常布局时返回 null，调用方回退为原生完整路径。
+ * 输出与原生逐像素一致（已对照真实路径 d 串验证）。
+ */
+function buildParentStepPath(
+  sourceX: number,
+  sourceY: number,
+  targetX: number,
+  targetY: number,
+  cutX: number | null,
+): string | null {
+  const OFFSET = 20;
+  const R = 5;
+  const sgY = sourceY + OFFSET; // 家长卡片下方留白点（sourceHandle=bottom）
+  const tgY = targetY - OFFSET; // 子女卡片上方留白点（targetHandle=top）
+  if (tgY <= sgY + 2 * R) return null; // 子女不在下方或间距过小，交给原生路径
+
+  const barY = (sgY + tgY) / 2; // 原生横杠高度 = 两个留白点的中点
+  const endX = cutX ?? targetX;
+
+  // 与原生 getBend 一致的圆角
+  const bend = (
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+    c: { x: number; y: number },
+  ): string => {
+    const size = Math.min(
+      Math.hypot(a.x - b.x, a.y - b.y) / 2,
+      Math.hypot(b.x - c.x, b.y - c.y) / 2,
+      R,
+    );
+    if ((a.x === b.x && b.x === c.x) || (a.y === b.y && b.y === c.y)) {
+      return `L${b.x} ${b.y}`;
+    }
+    if (a.y === b.y) {
+      const xDir = a.x < c.x ? -1 : 1;
+      const yDir = a.y < c.y ? 1 : -1;
+      return `L ${b.x + size * xDir},${b.y}Q ${b.x},${b.y} ${b.x},${b.y + size * yDir}`;
+    }
+    const xDir = a.x < c.x ? 1 : -1;
+    const yDir = a.y < c.y ? -1 : 1;
+    return `L ${b.x},${b.y + size * yDir}Q ${b.x},${b.y} ${b.x + size * xDir},${b.y}`;
+  };
+
+  const pts: Array<{ x: number; y: number }> = [
+    { x: sourceX, y: sourceY },
+    { x: sourceX, y: sgY },
+    { x: sourceX, y: barY },
+  ];
+  if (Math.abs(endX - sourceX) > 0.5) {
+    pts.push({ x: endX, y: barY });
+  }
+  if (cutX === null) {
+    // junction 边：完整路径（横线 → 子女竖线）
+    pts.push({ x: targetX, y: tgY }, { x: targetX, y: targetY });
+  }
+
+  let path = `M${pts[0].x} ${pts[0].y}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    path += bend(pts[i - 1], pts[i], pts[i + 1]);
+  }
+  path += `L${pts[pts.length - 1].x} ${pts[pts.length - 1].y}`;
+  return path;
+}
+
+function ParentLabeledEdge({
+  id,
+  sourceX,
+  sourceY,
+  sourcePosition,
+  targetX,
+  targetY,
+  targetPosition,
+  markerStart,
+  markerEnd,
+  style,
+  label,
+  data,
+}: EdgeProps) {
+  const otherId = (data as { otherParentId?: string } | undefined)?.otherParentId;
+  const otherNode = useStore((s) => (otherId ? s.nodeLookup.get(otherId) : undefined));
+  // 用 junction 边同款的 handle 坐标（ReactFlow 对 bottom handle 的 sourceX 就是这么算的），
+  // 保证截断点与 junction 竖线严丝合缝，不出现亚像素缺口。
+  const otherHandle =
+    otherNode?.internals.handleBounds?.source?.find((h) => h.id === 'bottom') ??
+    otherNode?.internals.handleBounds?.source?.[0];
+  const otherX = otherNode
+    ? otherNode.internals.positionAbsolute.x +
+      (otherHandle
+        ? otherHandle.x + otherHandle.width / 2
+        : (otherNode.measured?.width ?? 0) / 2)
+    : sourceX;
+
+  // junction：离子女更近的那位家长（距离相等时取 x 更小者，保证两条边判定一致）
+  const dSelf = Math.abs(targetX - sourceX);
+  const dOther = Math.abs(targetX - otherX);
+  const isJunction = dSelf < dOther || (dSelf === dOther && sourceX <= otherX);
+
+  // 横杠只画一次：junction 边画完整路径；远端家长的边在 junction 竖线处截断。
+  // 自绘失败（异常布局）时回退为原生完整路径。
+  const junctionX = isJunction ? sourceX : otherX;
+  const path = buildParentStepPath(sourceX, sourceY, targetX, targetY, isJunction ? null : junctionX)
+    ?? getSmoothStepPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })[0];
+
+  const stroke = (style?.stroke as string) || '#b1b1b7';
+
+  // 家长端挂点（sourceHandle = bottom，即家长卡片下沿中点）
+  // 标签就压在这个点下方一点点：避开来指家长的箭头（约 12px），又不至于离开卡片太远。
+  const LABEL_GAP = 24;
+  const labelX = sourceX;
+  const labelY = sourceY + LABEL_GAP;
+
+  return (
+    <>
+      <BaseEdge id={id} path={path} style={style} markerStart={markerStart} markerEnd={markerEnd} />
+      {label ? (
+        <EdgeLabelRenderer>
+          <div
+            style={{
+              position: 'absolute',
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              pointerEvents: 'none',
+              fontSize: 10,
+              fontWeight: 600,
+              lineHeight: '14px',
+              color: stroke,
+              background: 'var(--color-bg)',
+              borderRadius: 4,
+              padding: '0 5px',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {label}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
+  );
+}
+
+const edgeTypes: EdgeTypes = {
+  parentLabeled: ParentLabeledEdge as any,
 };
+
+/** 同辈排序可用的一行数据（排序面板） */
+interface SortRow {
+  person: Person;
+  /** 当前相对主视角的称谓 */
+  relation: string;
+  /** 出生日期展示文案 */
+  bornLabel: string;
+  /** 与"按出生日期"的默认顺序是否不一致（用于提示该顺序为手动指定） */
+  manual: boolean;
+}
+
 // 坐标系轴线与原点绘制组件
 function CoordinateAxes() {
   const { x, y } = useViewport();
@@ -292,15 +574,17 @@ function CoordinateAxes() {
 
 function TreePageContent() {
   const navigate = useNavigate();
-  const { project, getPersonsList, addPerson, setRelation, updatePerson, deletePerson, currentFilePath, saveCustomLayout, clearCustomLayout } = useFamilyStore();
+  const { project, getPersonsList, addPerson, setRelation, updatePerson, deletePerson, currentFilePath, currentProjectId, saveCustomLayout, clearCustomLayout, setDefaultPerspective, setSiblingOrder } = useFamilyStore();
   const persons = getPersonsList();
   // 用于一次性初始适应窗口 & 实时读取所有节点位置
-  const { fitView, getNodes, setCenter, getViewport } = useReactFlow();
+  const { fitView, getNodes, setCenter, getViewport, setViewport } = useReactFlow();
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
   const hasCustomLayout = !!(project?.customLayout && Object.keys(project.customLayout).length > 0);
+  // 本次运行内是否已自动定位过主视角（仅用于挂载初期的视口，避免恢复位置时闪一下默认视角）
+  const isSessionFirstEntry = !autoFocusedProjectIds.has(currentProjectId || 'default');
 
   const handleNodeDragStop = useCallback((_event: any, _node: Node, _currentNodes: Node[]) => {
     // 直接读取 ReactFlow 内部实时状态，避免回调参数中可能存在的位置回退问题
@@ -318,6 +602,15 @@ function TreePageContent() {
   }, [saveCustomLayout, getNodes]);
 
   const [showCoordinates, setShowCoordinates] = useState(false);
+  // 主视角切换面板
+  const [perspectivePickerOpen, setPerspectivePickerOpen] = useState(false);
+  const [perspectiveQuery, setPerspectiveQuery] = useState('');
+  // 同辈排序面板：以某位成员为锚点，调整其兄弟姐妹的长幼顺序
+  const [sortPersonId, setSortPersonId] = useState<string | null>(null);
+  // 悬停的人物卡片 id：用于悬停时高亮"主视角 → 该人"的关系路径连线
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const handleHoverStart = useCallback((personId: string) => setHoveredId(personId), []);
+  const handleHoverEnd = useCallback(() => setHoveredId(null), []);
   const showCoordinatesRef = useRef(showCoordinates);
   // 视图模式：true=显示默认算法布局，false=应用自定义布局
   const useDefaultLayoutRef = useRef(false);
@@ -339,10 +632,14 @@ function TreePageContent() {
     );
   }, [showCoordinates, setNodes]);
 
-  // 当节点选中状态变化时，动态更新连接该节点的边（由选中节点流向其父母、子女和配偶）以及层级与透明度
+  // 当节点选中或悬停状态变化时，动态更新连线样式：
+  // - 点击选中：高亮该节点的父母/子女/配偶连线（原有行为）
+  // - 悬停卡片：按"主视角 → 该人"的推导主路径高亮沿途连线（关系路径高亮）
   useEffect(() => {
     const selectedNode = nodes.find((n) => n.selected);
-    if (!selectedNode) {
+    const hoverActive = !selectedNode && !!hoveredId;
+
+    if (!selectedNode && !hoveredId) {
       setEdges((prevEdges) => {
         const nextEdges = prevEdges.map((edge) => {
           const nextStyle = { ...edge.style };
@@ -374,9 +671,72 @@ function TreePageContent() {
       return;
     }
 
-    const selectedId = selectedNode.id;
-    const person = project?.persons[selectedId];
+    const activeId = selectedNode ? selectedNode.id : hoveredId!;
+    const person = project?.persons[activeId];
     if (!person) return;
+
+    // ====== 悬停模式：高亮主视角到悬停者的关系路径 ======
+    if (hoverActive) {
+      const perspectiveId = project?.meta.defaultPerspectiveId;
+      const path = findKinshipPath(activeId, perspectiveId, project?.persons || {});
+      const pathEdgeIds = new Set<string>(
+        path ? findPathEdgeIds(path.ids, edges as any, project?.persons || {}) : []
+      );
+
+      setEdges((prevEdges) => {
+        const nextEdges = prevEdges.map((edge) => {
+          const nextStyle = { ...edge.style };
+          const isSpouse = edge.id.startsWith('spouse-');
+          const isAdopt = edge.id.startsWith('adopt-');
+
+          if (pathEdgeIds.has(edge.id)) {
+            // 路径上的连线：琥珀色加粗 + 流动动画
+            nextStyle.stroke = 'oklch(72% 0.16 70)';
+            nextStyle.strokeWidth = 3;
+            delete nextStyle.opacity;
+            return {
+              ...edge,
+              animated: false,
+              className: 'edge-flow-forward',
+              style: nextStyle,
+              markerStart: undefined,
+              markerEnd: undefined,
+              label: isSpouse ? '配偶' : undefined,
+              labelStyle: isSpouse ? { fontSize: 10, fill: 'oklch(72% 0.16 70)', transform: 'translateY(-6px)' } : undefined,
+              labelBgStyle: isSpouse ? { fill: 'transparent' } : undefined,
+              labelBgPadding: undefined,
+            };
+          }
+
+          // 路径外的连线淡化
+          nextStyle.stroke = isSpouse ? '#71717a' : '#b1b1b7';
+          nextStyle.strokeWidth = isAdopt ? 1.5 : 2;
+          nextStyle.opacity = 0.15;
+          return {
+            ...edge,
+            animated: false,
+            className: '',
+            style: nextStyle,
+            markerStart: undefined,
+            markerEnd: undefined,
+            label: isSpouse ? '配偶' : undefined,
+            labelStyle: isSpouse ? { fontSize: 10, fill: '#71717a', transform: 'translateY(-6px)' } : undefined,
+            labelBgStyle: isSpouse ? { fill: 'transparent' } : undefined,
+            labelBgPadding: undefined,
+          };
+        });
+        return [...nextEdges].sort((a, b) => {
+          const scoreA = (a.id.startsWith('spouse-') ? 2 : 0) + (a.className === 'edge-flow-forward' ? 1 : 0);
+          const scoreB = (b.id.startsWith('spouse-') ? 2 : 0) + (b.className === 'edge-flow-forward' ? 1 : 0);
+          return scoreA - scoreB;
+        });
+      });
+      return;
+    }
+
+    // ====== 选中模式（原有行为）======
+    if (!person) return;
+    const selectedId = activeId;
 
     // 父母：生父、生母、养父、养母
     const parents = [
@@ -530,7 +890,7 @@ function TreePageContent() {
         return scoreA - scoreB;
       });
     });
-  }, [nodes, project?.persons, setEdges]);
+  }, [nodes, hoveredId, project?.persons, setEdges]);
 
   // 智能自动修补关系数据（历史数据全局自动治愈）
   useEffect(() => {
@@ -654,6 +1014,8 @@ function TreePageContent() {
         person,
         isPerspective: person.id === perspectiveId,
         showCoordinates: showCoordinatesRef.current,
+        onHoverStart: handleHoverStart,
+        onHoverEnd: handleHoverEnd,
       },
     }));
 
@@ -661,34 +1023,42 @@ function TreePageContent() {
     const edgeSet = new Set<string>(); // 防止重复边
 
     personsList.forEach((person) => {
-      // 父子关系
+      // 亲子关系：生父、生母各自都与子女连线。
+      // 生父/生母的边统一用 parentLabeled 自定义边（几何与原生 smoothstep 完全相同），
+      // 唯一作用是把「生父 / 生母」称呼标签挂到自己那张家长卡片的下沿外侧——
+      // 单亲家庭也一样贴家长，不会出现"标签飘在半路"的情况。
       if (person.relations.father) {
         const key = `${person.relations.father}->${person.id}`;
         if (!edgeSet.has(key)) {
           edgeSet.add(key);
+          const hasBoth =
+            !!person.relations.mother && person.relations.mother !== person.relations.father;
           graphEdges.push({
             id: key,
             source: person.relations.father,
             target: person.id,
             sourceHandle: 'bottom',
             targetHandle: 'top',
-            type: 'smoothstep',
+            type: 'parentLabeled',
+            data: hasBoth ? { otherParentId: person.relations.mother } : undefined,
             style: { stroke: '#b1b1b7', strokeWidth: 2 },
             animated: false,
           });
         }
       }
-      if (person.relations.mother) {
+      if (person.relations.mother && person.relations.mother !== person.relations.father) {
         const key = `${person.relations.mother}->${person.id}`;
         if (!edgeSet.has(key)) {
           edgeSet.add(key);
+          const hasBoth = !!person.relations.father;
           graphEdges.push({
             id: key,
             source: person.relations.mother,
             target: person.id,
             sourceHandle: 'bottom',
             targetHandle: 'top',
-            type: 'smoothstep',
+            type: 'parentLabeled',
+            data: hasBoth ? { otherParentId: person.relations.father } : undefined,
             style: { stroke: '#b1b1b7', strokeWidth: 2 },
             animated: false,
           });
@@ -915,72 +1285,53 @@ function TreePageContent() {
       // 递归计算子代
       const children = person.relations.children || [];
       if (children.length > 0) {
-        // 子嗣排序：寻找包含主脉视角人员的子代作为中心锚点，其他手足左右交错排序，使主视角支系天然处于中心位置
+        // 子嗣排序：同辈中年龄最大的排最左。手动指定过排行时以手动顺序为准，
+        // 否则按出生日期（"未知"排最右，彼此按录入先后）。
         const childrenObj = [...children].map(c => project?.persons[c.id]).filter(Boolean) as Person[];
-        let anchorIndex = -1;
-        if (perspectiveId) {
-          anchorIndex = childrenObj.findIndex(c => isPerspectiveDescendant(c.id, perspectiveId, project?.persons || {}));
-        }
+        const sortedChildren: Person[] = sortSiblings(childrenObj, project?.meta.siblingOrder);
 
-        let sortedChildren: Person[] = [];
-        if (anchorIndex !== -1) {
-          const anchor = childrenObj[anchorIndex];
-          const others = childrenObj.filter((_, idx) => idx !== anchorIndex);
-
-          others.sort((a, b) => {
-            const dateA = a.birthDateSolar ? new Date(a.birthDateSolar).getTime() : Infinity;
-            const dateB = b.birthDateSolar ? new Date(b.birthDateSolar).getTime() : Infinity;
-            if (dateA !== dateB) return dateA - dateB;
-            return a.createdAt.localeCompare(b.createdAt);
-          });
-
-          const leftSide: Person[] = [];
-          const rightSide: Person[] = [];
-          if (others.length === 1) {
-            // 仅有两个手足时，将旁系手足放在右边，主脉锚点放在左边
-            rightSide.push(others[0]);
-          } else {
-            others.forEach((sib, index) => {
-              if (index % 2 === 0) {
-                leftSide.unshift(sib);
-              } else {
-                rightSide.push(sib);
-              }
-            });
-          }
-          sortedChildren = [...leftSide, anchor, ...rightSide];
-        } else {
-          sortedChildren = childrenObj;
-          sortedChildren.sort((a, b) => {
-            const dateA = a.birthDateSolar ? new Date(a.birthDateSolar).getTime() : Infinity;
-            const dateB = b.birthDateSolar ? new Date(b.birthDateSolar).getTime() : Infinity;
-            if (dateA !== dateB) return dateA - dateB;
-            return a.createdAt.localeCompare(b.createdAt);
-          });
-        }
-
-        // 递归子树布局时，手足之间纵向（Y轴）引入 50px 阶梯偏移
-        const childLayouts = sortedChildren.map((c, index) =>
-          layoutSubtree(c.id, currentY + 200 + index * 50)
+        // 递归子树布局：所有子女统一在同一代际水平线上（同一辈对齐同一 Y 轴）
+        const childLayouts = sortedChildren.map((c) =>
+          layoutSubtree(c.id, currentY + 200)
         );
+        // 从左往右通过 contours 消除子树重合。
+        // 注意：必须与"左边所有已放置子树的合并轮廓"比较，而不是只与上一个子树比较，
+        // 否则"宽子树-窄子树-窄子树"排列时，第三个子树会隔位压到第一个子树上（同辈对齐后尤其明显）。
         const childOffsets: number[] = new Array(childLayouts.length).fill(0);
+        const placedContour: Record<number, { left: number; right: number }> = {};
+        const mergeIntoPlaced = (
+          contour: Record<number, { left: number; right: number }>,
+          offset: number
+        ) => {
+          Object.entries(contour).forEach(([yStr, bounds]) => {
+            const y = Number(yStr);
+            const left = bounds.left + offset;
+            const right = bounds.right + offset;
+            if (placedContour[y]) {
+              placedContour[y].left = Math.min(placedContour[y].left, left);
+              placedContour[y].right = Math.max(placedContour[y].right, right);
+            } else {
+              placedContour[y] = { left, right };
+            }
+          });
+        };
 
-        // 从左往右通过 contours 消除子树重合
-        for (let i = 1; i < childLayouts.length; i++) {
-          const prevLayout = childLayouts[i - 1];
-          const currLayout = childLayouts[i];
-          const prevOffset = childOffsets[i - 1];
+        childLayouts.forEach((layout, i) => {
+          if (i === 0) {
+            mergeIntoPlaced(layout.contour, 0);
+            return;
+          }
 
           let maxShift = 0;
-          const prevYLevels = Object.keys(prevLayout.contour).map(Number);
-          const currYLevels = Object.keys(currLayout.contour).map(Number);
+          const prevYLevels = Object.keys(placedContour).map(Number);
+          const currYLevels = Object.keys(layout.contour).map(Number);
 
           // 全面检测纵向落在 150px 内的所有可能重合的高度层级
           prevYLevels.forEach(yPrev => {
             currYLevels.forEach(yCurr => {
               if (Math.abs(yPrev - yCurr) < 150) {
-                const prevRight = prevLayout.contour[yPrev].right + prevOffset;
-                const currLeft = currLayout.contour[yCurr].left;
+                const prevRight = placedContour[yPrev].right;
+                const currLeft = layout.contour[yCurr].left;
                 const gap = 120; // 严丝合缝的安全留白，卡片间距 120px
                 const shift = prevRight + gap - currLeft;
                 if (shift > maxShift) {
@@ -991,7 +1342,8 @@ function TreePageContent() {
           });
 
           childOffsets[i] = maxShift;
-        }
+          mergeIntoPlaced(layout.contour, maxShift);
+        });
 
         // 双数和单数都完美求其物理中心
         const firstChildX = childOffsets[0];
@@ -1033,6 +1385,7 @@ function TreePageContent() {
     const primaryRoots = roots.filter(n => isPrimaryNode(n.id));
 
     let currentRootOffset = 0;
+    const placedRootContour: Record<number, { left: number; right: number }> = {};
     primaryRoots.forEach((root, idx) => {
       // 根节点 Y 轴默认定为首层代际级别（相对0）
       const rootLayout = layoutSubtree(root.id, 0);
@@ -1045,17 +1398,30 @@ function TreePageContent() {
         }
       });
 
-      // 如果有多个根节点，防止根节点子树发生碰撞
+      // 合并当前根子树轮廓（含偏移），供后续根子树做全量碰撞检测
+      Object.entries(rootLayout.contour).forEach(([yStr, bounds]) => {
+        const y = Number(yStr);
+        const left = bounds.left + currentRootOffset;
+        const right = bounds.right + currentRootOffset;
+        if (placedRootContour[y]) {
+          placedRootContour[y].left = Math.min(placedRootContour[y].left, left);
+          placedRootContour[y].right = Math.max(placedRootContour[y].right, right);
+        } else {
+          placedRootContour[y] = { left, right };
+        }
+      });
+
+      // 如果有多个根节点，防止根节点子树发生碰撞（与左侧所有已放置根子树的合并轮廓比较）
       if (idx < primaryRoots.length - 1) {
-        let maxShift = 0;
         const nextRootLayout = layoutSubtree(primaryRoots[idx + 1].id, 0);
-        const yLevels = Object.keys(rootLayout.contour).map(Number);
+        let maxShift = 0;
+        const yLevels = Object.keys(placedRootContour).map(Number);
         const nextYLevels = Object.keys(nextRootLayout.contour).map(Number);
 
         yLevels.forEach(yPrev => {
           nextYLevels.forEach(yCurr => {
             if (Math.abs(yPrev - yCurr) < 150) {
-              const shift = rootLayout.contour[yPrev].right + 120 - nextRootLayout.contour[yCurr].left;
+              const shift = placedRootContour[yPrev].right + 120 - nextRootLayout.contour[yCurr].left;
               if (shift > maxShift) maxShift = shift;
             }
           });
@@ -1138,6 +1504,50 @@ function TreePageContent() {
       });
     }
 
+    // ====== 防重合兜底：扫描所有已定位节点，强制消除卡片横向重叠 ======
+    // 无论重合来自何种边角情况（双重布局、孤立节点、估算误差），此扫描保证最终不重叠。
+    // 只做水平微调，不改变 Y 轴，因此同辈对齐关系不受影响。
+    const estimateHalfWidth = (node: Node): number => {
+      const p = (node.data as any)?.person as Person | undefined;
+      if (!p) return 70;
+      const nameLen = (p.surname || '').length + (p.givenName || '').length;
+      // 卡片宽度估算：min-width 120，中文名约 20px/字 + 左右内边距
+      const width = Math.max(124, nameLen * 20 + 48);
+      return width / 2;
+    };
+    const ROW_TOLERANCE = 110; // 卡片实际高度约 110-120px，垂直距离小于此值才可能重叠
+    const positionedNodes = layouted.filter(
+      (n) => Number.isFinite(n.position.x) && Number.isFinite(n.position.y)
+    );
+    for (let pass = 0; pass < 12; pass++) {
+      let moved = false;
+      const sorted = [...positionedNodes].sort(
+        (a, b) => a.position.y - b.position.y || a.position.x - b.position.x
+      );
+      for (let i = 0; i < sorted.length; i++) {
+        const a = sorted[i];
+        const halfA = estimateHalfWidth(a);
+        for (let j = i + 1; j < sorted.length; j++) {
+          const b = sorted[j];
+          const dy = b.position.y - a.position.y;
+          if (dy > ROW_TOLERANCE) break; // 已按 Y 排序，后面不会再与 a 同行
+          const halfB = estimateHalfWidth(b);
+          const minDist = halfA + halfB + 6;
+          const dx = b.position.x - a.position.x;
+          if (Math.abs(dx) < minDist) {
+            // 把其中一张卡片向右推开，保持该行原有左右次序
+            if (dx >= 0) {
+              b.position.x += minDist - dx;
+            } else {
+              a.position.x += minDist + dx; // dx 为负，向右推 a
+            }
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+
     // 根据配偶双方最终对齐完毕后的物理 X 轴坐标，动态分配连接点 Handles，确保配偶连线始终水平且不产生穿透
     graphEdges.forEach((edge) => {
       if (edge.id.startsWith('spouse-')) {
@@ -1211,26 +1621,58 @@ function TreePageContent() {
       return scoreA - scoreB;
     });
     setEdges(defaultSortedEdges);
-  }, [project?.persons, project?.meta.defaultPerspectiveId, setNodes, setEdges, getNodes]);
+  }, [project?.persons, project?.meta.defaultPerspectiveId, project?.meta.siblingOrder, setNodes, setEdges, getNodes, handleHoverStart, handleHoverEnd]);
 
   useEffect(() => {
     buildGraph();
   }, [buildGraph]);
 
-  // 初始构建后的开场动画（仅一次）：先全景，再平滑聚焦到主视角人物
-  const didInitFitViewRef = useRef(false);
+  // 进入家谱树时的视口初始化（每个项目在本项目运行期间只自动定位一次）：
+  // - 本次运行内首次进入该项目：播放"全景 → 聚焦主视角"的开场
+  // - 之后再次进入该项目：恢复到上次离开时停留的位置（手动平移/缩放过的视口）
+  const didInitViewportRef = useRef(false);
   const entryFocusTimerRef = useRef<number | null>(null);
+  // 进入页面时先把"上次停留位置"取出来（首帧前读取，避免被挂载初期的视口回调覆盖）
+  const [initialSavedViewport] = useState<SavedViewport | null>(() => readSavedViewport(currentProjectId));
+  // 视口初始化完成前，禁止写入记忆，避免把挂载初期的默认视口当成"上次停留位置"
+  const canPersistViewportRef = useRef(false);
   useEffect(() => {
-    if (nodes.length === 0 || didInitFitViewRef.current) return;
-    didInitFitViewRef.current = true;
+    if (nodes.length === 0 || didInitViewportRef.current) return;
+    didInitViewportRef.current = true;
 
     // 尊重系统的“减少动态效果”设置：直接落到目标视角，不做过渡
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const perspectiveId = project?.meta.defaultPerspectiveId;
+    const projectKey = currentProjectId || 'default';
+    const isFirstEntryOfSession = !autoFocusedProjectIds.has(projectKey);
 
     // 延迟一帧等 ReactFlow 渲染完成
     requestAnimationFrame(() => {
-      // 第一幕：整棵树的全局视图（瞬时，先让用户看到全貌）
+      // ====== 非首次进入：恢复上次停留的视口，不做任何开场动画 ======
+      if (!isFirstEntryOfSession) {
+        if (initialSavedViewport) {
+          setViewport(initialSavedViewport, { duration: 0 });
+          canPersistViewportRef.current = true;
+          return;
+        }
+        // 没有历史视口（如旧版本升级上来的用户）：直接落到主视角
+        const focusNode = getNodes().find((n) => n.id === perspectiveId);
+        if (focusNode) {
+          // nodeOrigin 为 [0.5, 0.5]，节点坐标即其中心，直接居中即可
+          setCenter(focusNode.position.x, focusNode.position.y, {
+            zoom: ENTRY_FOCUS_ZOOM,
+            duration: 0,
+          });
+        } else {
+          fitView({ padding: 0.3 });
+        }
+        canPersistViewportRef.current = true;
+        return;
+      }
+
+      // ====== 本次运行首次进入：第一幕整棵树全局视图 → 第二幕聚焦主视角 ======
+      autoFocusedProjectIds.add(projectKey);
+      canPersistViewportRef.current = true;
       fitView({ padding: 0.3 });
 
       // 再等一帧，等视口变更落到 DOM 后再读实际缩放值
@@ -1260,7 +1702,16 @@ function TreePageContent() {
         entryFocusTimerRef.current = null;
       }
     };
-  }, [nodes.length, fitView, getNodes, setCenter, getViewport, project?.meta.defaultPerspectiveId]);
+  }, [nodes.length, fitView, getNodes, setCenter, getViewport, setViewport, initialSavedViewport, project?.meta.defaultPerspectiveId, currentProjectId]);
+
+  // 视口变动结束后，记录当前停留位置，供下次进入家谱树时恢复
+  const handleMoveEnd = useCallback(
+    (_event: unknown, viewport: { x: number; y: number; zoom: number }) => {
+      if (!canPersistViewportRef.current) return;
+      writeSavedViewport(currentProjectId, viewport);
+    },
+    [currentProjectId]
+  );
 
   // 右键菜单处理
   const handleNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {
@@ -1345,6 +1796,111 @@ function TreePageContent() {
     });
   };
 
+  // 切换主视角：整套称谓、关系路径高亮都以新视角为基准
+  const handleSwitchPerspective = useCallback(
+    (personId: string) => {
+      if (!personId) return;
+      setDefaultPerspective(personId);
+      setPerspectivePickerOpen(false);
+      setPerspectiveQuery('');
+      // 等布局按新主视角重算完，再把视图平滑移到该成员身上
+      window.setTimeout(() => {
+        const node = getNodes().find((n) => n.id === personId);
+        if (node) {
+          setCenter(node.position.x, node.position.y, { zoom: ENTRY_FOCUS_ZOOM, duration: 600 });
+        }
+      }, 80);
+    },
+    [setDefaultPerspective, getNodes, setCenter]
+  );
+
+  // 主视角展示名 + 切换面板的候选列表（支持按姓名或称谓搜索）
+  const perspectivePerson = project?.meta.defaultPerspectiveId
+    ? project.persons[project.meta.defaultPerspectiveId]
+    : undefined;
+  const perspectiveLabel = perspectivePerson
+    ? getFullName(perspectivePerson.surname, perspectivePerson.givenName) || '未命名'
+    : '未设置';
+  const pickerKeyword = perspectiveQuery.trim();
+  const perspectiveCandidates = pickerKeyword
+    ? persons.filter((p) => {
+        const name = getFullName(p.surname, p.givenName) || '';
+        const rel = getRelationshipText(
+          p.id,
+          project?.meta.defaultPerspectiveId,
+          project?.persons || {},
+          project?.meta.siblingOrder
+        );
+        return name.includes(pickerKeyword) || rel.includes(pickerKeyword);
+      })
+    : persons;
+
+  // ==================== 同辈排序 ====================
+  // 手动顺序优先于出生日期：解决"不知道生日但知道排行"的场景；
+  // 排序结果同时用于树布局与称谓推导，保证左右顺序与 兄/弟、姐/妹、伯/叔 一致。
+  const siblingOrder: SiblingOrderMap | undefined = project?.meta.siblingOrder;
+
+  const sortAnchor = sortPersonId && project ? project.persons[sortPersonId] : undefined;
+  const sortGroupMembers: Person[] = (() => {
+    if (!sortAnchor || !project) return [];
+    const anchorParents = parentIdsOf(sortAnchor);
+    if (!anchorParents.length) return [sortAnchor];
+    return Object.values(project.persons).filter(
+      (p) => p.id === sortAnchor.id || parentIdsOf(p).some((pid) => anchorParents.includes(pid))
+    );
+  })();
+
+  const sortRows: SortRow[] = (() => {
+    if (sortGroupMembers.length < 2) return [];
+    const ordered = sortSiblings(sortGroupMembers, siblingOrder);
+    // 与"纯按出生日期"的默认顺序对比：位置不同的人标记为手动调整过
+    const defaultIds = sortSiblings(sortGroupMembers, undefined).map((p) => p.id);
+    return ordered.map((p, index) => ({
+      person: p,
+      relation:
+        p.id === project?.meta.defaultPerspectiveId
+          ? '当前主视角'
+          : getRelationshipText(
+              p.id,
+              project?.meta.defaultPerspectiveId,
+              project?.persons || {},
+              siblingOrder
+            ),
+      bornLabel: p.birthDateSolar ? p.birthDateSolar.slice(0, 10) : '出生日期未知',
+      manual: defaultIds.indexOf(p.id) !== index,
+    }));
+  })();
+  const sortIsManual = hasManualOrder(sortGroupMembers, siblingOrder);
+
+  const moveInSiblingGroup = (personId: string, delta: number) => {
+    if (!project) return;
+    const orderedIds = sortSiblings(sortGroupMembers, siblingOrder).map((p) => p.id);
+    const idx = orderedIds.indexOf(personId);
+    const next = idx + delta;
+    if (idx < 0 || next < 0 || next >= orderedIds.length) return;
+    [orderedIds[idx], orderedIds[next]] = [orderedIds[next], orderedIds[idx]];
+    // 顺序变了，卡片必须跟着重排：本次强制走默认布局，否则旧位置会被保留
+    useDefaultLayoutRef.current = true;
+    setSiblingOrder(
+      applyGroupOrder(
+        project.meta.siblingOrder,
+        sortGroupMembers.map((p) => p.id),
+        orderedIds
+      )
+    );
+  };
+
+  const resetSiblingGroup = () => {
+    if (!project) return;
+    useDefaultLayoutRef.current = true;
+    setSiblingOrder(
+      clearGroupOrder(
+        project.meta.siblingOrder,
+        sortGroupMembers.map((p) => p.id)
+      )
+    );
+  };
+
   // 空状态
   if (persons.length === 0) {
     return (
@@ -1411,6 +1967,23 @@ function TreePageContent() {
         )}
         <div className="tree-toolbar-right">
           <button
+            className="btn btn-sm btn-secondary perspective-switch-btn"
+            onClick={() => {
+              setPerspectiveQuery('');
+              setPerspectivePickerOpen(true);
+            }}
+            title="切换主视角：所有称谓与关系路径都以所选成员为基准"
+          >
+            🧭 主视角：{perspectiveLabel}
+          </button>
+          <button
+            className="btn btn-sm btn-secondary"
+            onClick={() => setSortPersonId(project?.meta.defaultPerspectiveId || persons[0]?.id || null)}
+            title="调整同辈兄弟姐妹的长幼顺序（出生日期未知时也能指定排行）"
+          >
+            ↔ 同辈排序
+          </button>
+          <button
             className={`btn btn-sm ${showCoordinates ? 'btn-primary' : 'btn-secondary'}`}
             style={{
               display: 'flex',
@@ -1426,6 +1999,25 @@ function TreePageContent() {
           </button>
           <button className="btn btn-sm btn-secondary" onClick={() => navigate('/person/new/edit')}>
             ➕ 添加人员
+          </button>
+          <button
+            className="btn btn-sm btn-secondary"
+            onClick={() => {
+              const perspectiveId = project?.meta.defaultPerspectiveId;
+              const focusNode = getNodes().find((n) => n.id === perspectiveId);
+              if (focusNode) {
+                setCenter(focusNode.position.x, focusNode.position.y, {
+                  zoom: ENTRY_FOCUS_ZOOM,
+                  duration: 600,
+                });
+              } else {
+                // 未设置主视角时退回全局视图
+                fitView({ padding: 0.3 });
+              }
+            }}
+            title="把视图移动并缩放到主视角人物"
+          >
+            🎯 定位主视角
           </button>
           <button
             className="btn btn-sm btn-secondary"
@@ -1484,9 +2076,12 @@ function TreePageContent() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodeContextMenu={handleNodeContextMenu}
           onPaneClick={handlePaneClick}
           onNodeDragStop={handleNodeDragStop}
+          onMoveEnd={handleMoveEnd}
+          defaultViewport={isSessionFirstEntry ? undefined : (initialSavedViewport ?? undefined)}
           ariaLabelConfig={{
             'controls.zoomIn.ariaLabel': '放大',
             'controls.zoomOut.ariaLabel': '缩小',
@@ -1512,6 +2107,173 @@ function TreePageContent() {
         </ReactFlow>
       </div>
 
+      {/* 主视角切换面板 */}
+      {perspectivePickerOpen && (
+        <div className="perspective-picker-overlay" onClick={() => setPerspectivePickerOpen(false)}>
+          <div className="perspective-picker" onClick={(e) => e.stopPropagation()}>
+            <div className="perspective-picker-header">
+              <div>
+                <div className="perspective-picker-title">切换主视角</div>
+                <div className="perspective-picker-sub">
+                  选择一位成员，卡片称谓、双向关系与路径高亮都会以他/她为基准
+                </div>
+              </div>
+              <button
+                className="perspective-picker-close"
+                onClick={() => setPerspectivePickerOpen(false)}
+                aria-label="关闭"
+              >
+                ✕
+              </button>
+            </div>
+
+            <input
+              className="perspective-picker-search"
+              placeholder="搜索姓名或称谓（如：大伯、二哥）"
+              value={perspectiveQuery}
+              onChange={(e) => setPerspectiveQuery(e.target.value)}
+              autoFocus
+            />
+
+            <div className="perspective-picker-list">
+              {perspectiveCandidates.length === 0 && (
+                <div className="perspective-picker-empty">没有匹配的成员</div>
+              )}
+              {perspectiveCandidates.map((p) => {
+                const name = getFullName(p.surname, p.givenName) || '未命名';
+                const isCurrent = p.id === project?.meta.defaultPerspectiveId;
+                const rel = isCurrent
+                  ? '当前主视角'
+                  : getRelationshipText(
+                      p.id,
+                      project?.meta.defaultPerspectiveId,
+                      project?.persons || {},
+                      project?.meta.siblingOrder
+                    );
+                return (
+                  <button
+                    key={p.id}
+                    className={`perspective-picker-item ${isCurrent ? 'active' : ''}`}
+                    onClick={() => handleSwitchPerspective(p.id)}
+                  >
+                    <span className={`perspective-picker-avatar ${p.gender}`}>
+                      {p.avatar ? (
+                        <img src={convertLocalSrc(p.avatar)} alt={name} />
+                      ) : (
+                        (p.surname || '·').slice(0, 1)
+                      )}
+                    </span>
+                    <span className="perspective-picker-name">{name}</span>
+                    <span className="perspective-picker-rel">{rel}</span>
+                    {isCurrent && <span className="perspective-picker-check">✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 同辈排序面板 */}
+      {sortPersonId && (
+        <div className="perspective-picker-overlay" onClick={() => setSortPersonId(null)}>
+          <div className="perspective-picker sort-picker" onClick={(e) => e.stopPropagation()}>
+            <div className="perspective-picker-header">
+              <div>
+                <div className="perspective-picker-title">同辈排序</div>
+                <div className="perspective-picker-sub">
+                  左侧为年长、右侧为年幼，点行尾的 ← → 调整位置。
+                  即使出生日期未知也可以指定排行，修改立即生效并随档案保存；
+                  顺序会同时决定卡片位置与「兄/弟、姐/妹、伯/叔」等称呼。
+                </div>
+              </div>
+              <button
+                className="perspective-picker-close"
+                onClick={() => setSortPersonId(null)}
+                aria-label="关闭"
+              >
+                ✕
+              </button>
+            </div>
+
+            {sortRows.length < 2 ? (
+              <div className="perspective-picker-empty">
+                {sortAnchor && parentIdsOf(sortAnchor).length === 0
+                  ? '这位成员还没有登记父母，无法确定同辈兄弟姐妹。请先在编辑页补充父/母信息。'
+                  : '这一辈暂时只有 1 人，无需排序。'}
+              </div>
+            ) : (
+              <>
+                <div className="sort-group-hint">
+                  {getFullName(sortAnchor?.surname || '', sortAnchor?.givenName || '') || '该成员'} 的兄弟姐妹 · 共{' '}
+                  {sortRows.length} 人
+                  {sortIsManual && <span className="sort-manual-tag">已手动排序</span>}
+                </div>
+                <div className="perspective-picker-list sort-list">
+                  {sortRows.map((row, index) => {
+                    const name = getFullName(row.person.surname, row.person.givenName) || '未命名';
+                    return (
+                      <div
+                        key={row.person.id}
+                        className={`sort-row ${row.person.id === sortPersonId ? 'active' : ''}`}
+                      >
+                        <span className="sort-index">{index + 1}</span>
+                        <span className={`perspective-picker-avatar ${row.person.gender}`}>
+                          {row.person.avatar ? (
+                            <img src={convertLocalSrc(row.person.avatar)} alt={name} />
+                          ) : (
+                            (row.person.surname || '·').slice(0, 1)
+                          )}
+                        </span>
+                        <span className="sort-name">
+                          <span className="sort-name-main">
+                            {name}
+                            {row.manual && <span className="sort-row-tag">手动</span>}
+                          </span>
+                          <span className="sort-born">{row.bornLabel}</span>
+                        </span>
+                        <span className="perspective-picker-rel">{row.relation}</span>
+                        <span className="sort-actions">
+                          <button
+                            className="sort-move-btn"
+                            disabled={index === 0}
+                            onClick={() => moveInSiblingGroup(row.person.id, -1)}
+                            title="前移一位（更年长）"
+                          >
+                            ←
+                          </button>
+                          <button
+                            className="sort-move-btn"
+                            disabled={index === sortRows.length - 1}
+                            onClick={() => moveInSiblingGroup(row.person.id, 1)}
+                            title="后移一位（更年幼）"
+                          >
+                            →
+                          </button>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="sort-footer">
+                  <button
+                    className="btn btn-sm btn-secondary"
+                    onClick={resetSiblingGroup}
+                    disabled={!sortIsManual}
+                    title="清除手动顺序，恢复按出生日期排序"
+                  >
+                    按出生日期重排
+                  </button>
+                  <button className="btn btn-sm btn-primary" onClick={() => setSortPersonId(null)}>
+                    完成
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 右键菜单 */}
       {contextMenu && (
         <>
@@ -1534,6 +2296,30 @@ function TreePageContent() {
                 <button className="context-menu-item" onClick={() => navigate(`/person/${contextMenu.personId}/edit`)}>
                   ✏️ 编辑信息
                 </button>
+                {contextMenu.personId !== project?.meta.defaultPerspectiveId && (
+                  <button
+                    className="context-menu-item"
+                    onClick={() => {
+                      const targetId = contextMenu.personId;
+                      setContextMenu(null);
+                      handleSwitchPerspective(targetId);
+                    }}
+                  >
+                    🧭 设为主视角
+                  </button>
+                )}
+                {(targetPerson ? parentIdsOf(targetPerson).length > 0 : false) && (
+                  <button
+                    className="context-menu-item"
+                    onClick={() => {
+                      const targetId = contextMenu.personId;
+                      setContextMenu(null);
+                      setSortPersonId(targetId);
+                    }}
+                  >
+                    ↔ 调整同辈顺序
+                  </button>
+                )}
                 <div className="context-menu-divider" />
                 {!hasFather && (
                   <button className="context-menu-item" onClick={() => handleAddRelation('father')}>

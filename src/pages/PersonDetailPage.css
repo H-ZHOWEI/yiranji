@@ -766,3 +766,17 @@
 }
 
 
+
+/* 头像可点击查看大图 */
+.person-detail-avatar img.clickable {
+  cursor: zoom-in;
+  transition: filter 0.18s ease, transform 0.18s ease;
+}
+
+.person-detail-avatar img.clickable:hover {
+  filter: brightness(1.04) saturate(1.02);
+}
+
+.person-detail-avatar img.rect-avatar-img.clickable:hover {
+  transform: scale(1.008);
+}

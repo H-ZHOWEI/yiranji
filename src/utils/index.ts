@@ -322,7 +322,7 @@ export const CHINESE_PROVINCES = [
  * 校验指定公历年月日是否合法
  */
 export function isValidSolarDate(year: number, month: number, day: number): boolean {
-  if (year < 1900 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+  if (year < 1800 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
     return false;
   }
   const date = new Date(year, month - 1, day);
@@ -438,86 +438,20 @@ export function getSiblingRank(
 }
 
 /**
- * 智能计算目标人与主视角的家庭关系称呼（支持两代以内主要直系/旁系亲属）
+ * 智能计算目标人与主视角的家庭关系称呼
+ * 实现已迁移至 ./kinship（BFS 路径推导 + 称谓查表），此处保持向后兼容导出
  */
-export function getRelationshipText(
-  targetId: string,
-  perspectiveId: string | undefined,
-  persons: Record<string, any>
-): string {
-  if (!perspectiveId) return '';
-  if (targetId === perspectiveId) return '主视角';
-
-  const target = persons[targetId];
-  const perspect = persons[perspectiveId];
-  if (!target || !perspect) return '';
-
-  // 1. 直系父母
-  if (perspect.relations.father === targetId) return '父亲';
-  if (perspect.relations.mother === targetId) return '母亲';
-  if (perspect.relations.adoptiveFather === targetId) return '养父';
-  if (perspect.relations.adoptiveMother === targetId) return '养母';
-
-  // 2. 配偶
-  if (perspect.relations.spouses && perspect.relations.spouses.some((s: any) => s.id === targetId)) {
-    return '配偶';
-  }
-
-  // 3. 子女
-  if (target.relations.father === perspectiveId || target.relations.mother === perspectiveId) {
-    return target.gender === 'male' ? '儿子' : '女儿';
-  }
-  if (target.relations.adoptiveFather === perspectiveId || target.relations.adoptiveMother === perspectiveId) {
-    return target.gender === 'male' ? '养子' : '养女';
-  }
-
-  // 4. 兄弟姐妹
-  const f_p = perspect.relations.father;
-  const m_p = perspect.relations.mother;
-  const af_p = perspect.relations.adoptiveFather;
-  const am_p = perspect.relations.adoptiveMother;
-
-  const f_t = target.relations.father;
-  const m_t = target.relations.mother;
-  const af_t = target.relations.adoptiveFather;
-  const am_t = target.relations.adoptiveMother;
-
-  const shareFather = f_p && f_t && f_p === f_t;
-  const shareMother = m_p && m_t && m_p === m_t;
-  const shareAdoptiveFather = af_p && af_t && af_p === af_t;
-  const shareAdoptiveMother = am_p && am_t && am_p === am_t;
-
-  if (shareFather || shareMother || shareAdoptiveFather || shareAdoptiveMother) {
-    return getSiblingRank(targetId, persons, perspectiveId);
-  }
-
-  // 5. 祖辈
-  if (f_p && persons[f_p]) {
-    const grandpa = persons[f_p].relations.father;
-    const grandma = persons[f_p].relations.mother;
-    if (grandpa === targetId) return '祖父 (爷爷)';
-    if (grandma === targetId) return '祖母 (奶奶)';
-  }
-  if (m_p && persons[m_p]) {
-    const grandpa_m = persons[m_p].relations.father;
-    const grandma_m = persons[m_p].relations.mother;
-    if (grandpa_m === targetId) return '外祖父 (姥爷)';
-    if (grandma_m === targetId) return '外祖母 (姥姥)';
-  }
-
-  // 6. 孙辈
-  const pChildren = Object.values(persons).filter(
-    (p: any) => p.relations.father === perspectiveId || p.relations.mother === perspectiveId
-  );
-  for (const child of pChildren) {
-    if (target.relations.father === child.id || target.relations.mother === child.id) {
-      if (child.gender === 'male') {
-        return target.gender === 'male' ? '孙子' : '孙女';
-      } else {
-        return target.gender === 'male' ? '外孙' : '外外孙女';
-      }
-    }
-  }
-
-  return '家族成员';
-}
+export { getRelationshipText, findKinshipPath, findPathEdgeIds } from './kinship';
+export type { KinshipPath } from './kinship';
+export {
+  compareByAge,
+  compareSiblings,
+  sortSiblings,
+  parentIdsOf,
+  areSiblings,
+  hasManualOrder,
+  applyGroupOrder,
+  clearGroupOrder,
+  birthTimeOf,
+} from './siblingOrder';
+export type { SiblingOrderMap } from './siblingOrder';

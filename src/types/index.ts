@@ -137,6 +137,17 @@ export interface FamilyMeta {
   updatedAt: string;
   defaultPerspectiveId?: string;
   description?: string;
+  /**
+   * 同辈手写排序：personId → 在其兄弟姐妹组中的位次（0 = 最年长）。
+   * 出生日期未知的人默认排在已知者右侧，可用「同辈排序」面板手动指定长幼，
+   * 排序结果同时决定称谓（兄/弟、姐/妹、伯/叔 等）。
+   */
+  siblingOrder?: Record<string, number>;
+  /**
+   * 云同步标识：每个家谱一个稳定 ID，云端用它区分子目录。
+   * 不随导入/另存改变，因此两台电脑能定位到同一份云端档案。
+   */
+  syncKey?: string;
 }
 
 // ==================== 应用状态 ====================

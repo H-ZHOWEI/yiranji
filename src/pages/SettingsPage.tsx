@@ -1,13 +1,27 @@
 import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useFamilyStore } from '../store/familyStore';
-import { openDevtools, isTauri, selectFilePathForSaveZip, writeBinaryFile, getAppLogs, openUrl } from '../utils/tauri';
+import { openDevtools, isTauri, selectFilePathForSaveZip, writeBinaryFile, getAppLogs, openUrl, selectProjectParentDir, moveProjectWorkspace, openInExplorer, webdavTest, webdavRemoteMeta, webdavListProjects, type RemoteSyncMeta, type RemoteProject } from '../utils/tauri';
+import { getDefaultSaveDir, setDefaultSaveDir } from '../utils/appPrefs';
+import { exportProjectFile, countEmbeddedMedia, safeFolderName } from '../utils/projectPortable';
+import {
+  getSyncSettings,
+  saveSyncSettings,
+  isSyncConfigured,
+  remoteDirFor,
+  formatSyncTime,
+  formatBytes,
+  WEBDAV_PRESETS,
+  type SyncSettings,
+} from '../utils/cloudSync';
 import { checkForUpdate } from '../utils/updateChecker';
 import { useUpdateStore } from '../store/updateStore';
 import { createAnonymizedExport, sha256 } from '../utils';
 import './SettingsPage.css';
 
 export default function SettingsPage() {
-  const { project, updateMeta, changeProjectPassword, isAnonymized, toggleAnonymization } = useFamilyStore();
+  const navigate = useNavigate();
+  const { project, updateMeta, changeProjectPassword, isAnonymized, toggleAnonymization, currentFilePath, relocateProject, syncPushToCloud, syncPullFromCloud, restoreProjectFromCloud } = useFamilyStore();
 
   const [familyName, setFamilyName] = useState(project?.meta.familyName || '');
   const [newPassword, setNewPassword] = useState('');
@@ -16,6 +30,19 @@ export default function SettingsPage() {
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+
+  // 档案存储：新建档案的默认保存位置（全局偏好）
+  const [defaultSaveDir, setDefaultSaveDirState] = useState<string>(() => getDefaultSaveDir());
+  const [isMoving, setIsMoving] = useState(false);
+  const [isExportingProject, setIsExportingProject] = useState(false);
+
+  // 多设备同步（WebDAV）
+  const [sync, setSync] = useState<SyncSettings>(() => getSyncSettings());
+  const [syncBusy, setSyncBusy] = useState<'' | 'test' | 'push' | 'pull'>('');
+  const [remoteMeta, setRemoteMeta] = useState<RemoteSyncMeta | null>(null);
+  const [remoteProjects, setRemoteProjects] = useState<RemoteProject[] | null>(null);
+  const [loadingRemoteList, setLoadingRemoteList] = useState(false);
+  const [restoringDir, setRestoringDir] = useState('');
 
   // -------------------- Toast --------------------
   const [toast, setToast] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
@@ -37,12 +64,23 @@ export default function SettingsPage() {
     setToastKey(k => k + 1);
   };
 
+  // 从侧边栏「云同步」进来时，直接滚到同步板块
+  useEffect(() => {
+    if (window.location.hash !== '#sync-section') return;
+    const timer = window.setTimeout(() => {
+      document.getElementById('sync-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   // -------------------- 自定义对话框 --------------------
   interface DialogState {
     show: boolean;
     title: string;
     message: string;
     requirePassword?: boolean;
+    confirmText?: string;
+    tone?: 'danger' | 'primary';
     onConfirm: (password?: string) => Promise<boolean>;
   }
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -67,6 +105,36 @@ export default function SettingsPage() {
       closeDialog();
     }
   };
+
+  // -------------------- 多设备同步：设置与云端状态 --------------------
+  const patchSync = (patch: Partial<SyncSettings>) => {
+    setSync(saveSyncSettings(patch));
+  };
+
+  const syncKeyOf = project?.meta.syncKey;
+
+  const refreshRemoteMeta = async () => {
+    if (!isTauri() || !isSyncConfigured(sync) || !syncKeyOf) {
+      setRemoteMeta(null);
+      return;
+    }
+    try {
+      const meta = await webdavRemoteMeta(
+        sync.server,
+        sync.username,
+        sync.password,
+        remoteDirFor(sync, syncKeyOf)
+      );
+      setRemoteMeta(meta);
+    } catch {
+      setRemoteMeta(null);
+    }
+  };
+
+  useEffect(() => {
+    refreshRemoteMeta();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncKeyOf, sync.server, sync.username, sync.password, sync.remoteRoot]);
 
   // -------------------- 表单提交 --------------------
   if (!project) return null;
@@ -272,6 +340,271 @@ export default function SettingsPage() {
     }
   };
 
+  // ==================== 档案存储相关 ====================
+
+  const handleCopyPath = async (path: string) => {
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      showToast('路径已复制到剪贴板', 'success');
+    } catch {
+      showToast('复制失败，请手动选中路径复制', 'error');
+    }
+  };
+
+  const handleOpenFolder = async (path: string) => {
+    if (!path) return;
+    try {
+      await openInExplorer(path);
+    } catch (err: any) {
+      showToast(`打开文件夹失败：${err?.message || err}`, 'error');
+    }
+  };
+
+  const handleChooseDefaultDir = async () => {
+    try {
+      const dir = await selectProjectParentDir(defaultSaveDir || currentFilePath || null);
+      if (!dir) return;
+      setDefaultSaveDir(dir);
+      setDefaultSaveDirState(dir);
+      showToast('默认保存位置已更新', 'success');
+    } catch (err: any) {
+      showToast(`选择目录失败：${err?.message || err}`, 'error');
+    }
+  };
+
+  const handleClearDefaultDir = () => {
+    setDefaultSaveDir('');
+    setDefaultSaveDirState('');
+    showToast('已恢复为每次新建时询问位置', 'success');
+  };
+
+  const handleRelocate = async () => {
+    if (!currentFilePath || isMoving) return;
+    try {
+      const parent = await selectProjectParentDir(currentFilePath);
+      if (!parent) return;
+
+      setIsMoving(true);
+      const newPath = await moveProjectWorkspace(currentFilePath, parent);
+      await relocateProject(newPath);
+
+      // 迁移成功后，把新位置同步为默认保存位置，避免下次新建又跑到老地方
+      if (defaultSaveDir) {
+        setDefaultSaveDir(parent);
+        setDefaultSaveDirState(parent);
+      }
+
+      showToast(`档案已迁移到：${newPath}（原目录仍保留，可手动删除）`, 'success');
+    } catch (err: any) {
+      showToast(`迁移失败：${err?.message || err}`, 'error');
+    } finally {
+      setIsMoving(false);
+    }
+  };
+
+  // -------------------- 导出完整工程数据（网页版 → 桌面版迁移用） --------------------
+  const handleExportProject = async () => {
+    if (!project || isExportingProject) return;
+    setIsExportingProject(true);
+    try {
+      const stamp = new Date().toISOString().slice(0, 10);
+      const fileName = `${safeFolderName(project.meta.familyName)}_${stamp}.json`;
+      const result = await exportProjectFile(project, fileName);
+      if (result === 'saved') {
+        showToast(
+          isTauri()
+            ? '工程数据已导出，可在任意设备的「导入工程文件」中打开'
+            : '工程数据已下载到电脑，桌面版用「导入工程文件」即可载入',
+          'success'
+        );
+      }
+    } catch (err: any) {
+      showToast(`导出失败：${err?.message || err}`, 'error');
+    } finally {
+      setIsExportingProject(false);
+    }
+  };
+
+  const embeddedMediaCount = countEmbeddedMedia(project);
+
+  // ==================== 多设备同步（WebDAV） ====================
+  const syncKey = project.meta.syncKey;
+  const cloudDir = syncKey ? remoteDirFor(sync, syncKey) : '';
+
+  const handleSyncTest = async () => {
+    if (!isTauri()) {
+      showToast('云同步仅在桌面版可用', 'error');
+      return;
+    }
+    if (!isSyncConfigured(sync)) {
+      showToast('请先填写服务器地址、账号和应用密码', 'error');
+      return;
+    }
+    setSyncBusy('test');
+    try {
+      const root = sync.remoteRoot.replace(/^\/+|\/+$/g, '') || 'yiranji';
+      const path = await webdavTest(sync.server, sync.username, sync.password, root);
+      showToast(`连接成功，云端目录：${path}`, 'success');
+      await refreshRemoteMeta();
+    } catch (err: any) {
+      showToast(`连接失败：${err?.message || err}`, 'error');
+    } finally {
+      setSyncBusy('');
+    }
+  };
+
+  const handleSyncPush = async () => {
+    if (!isTauri()) {
+      showToast('云同步仅在桌面版可用', 'error');
+      return;
+    }
+    if (!currentFilePath) {
+      showToast('请先把档案保存到本地文件夹', 'error');
+      return;
+    }
+    if (!isSyncConfigured(sync)) {
+      showToast('请先填写服务器地址、账号和应用密码', 'error');
+      return;
+    }
+
+    setSyncBusy('push');
+    try {
+      const remoteNewer =
+        !!remoteMeta?.projectUpdatedAt &&
+        remoteMeta.projectUpdatedAt > (project.meta.updatedAt || '');
+      if (remoteNewer && !sync.forceOverwrite) {
+        showToast(
+          `云端有更新的版本（${formatSyncTime(remoteMeta!.updatedAt)}，来自 ${remoteMeta!.device}），请先拉取；确需覆盖请勾选「允许覆盖云端」`,
+          'error'
+        );
+        return;
+      }
+      const report = await syncPushToCloud();
+      showToast(
+        `已上传：新增媒体 ${report.uploadedMedia} 个、跳过已存在 ${report.skippedMedia} 个，工程数据 ${formatBytes(report.projectBytes)}`,
+        'success'
+      );
+      await refreshRemoteMeta();
+    } catch (err: any) {
+      showToast(`上传失败：${err?.message || err}`, 'error');
+    } finally {
+      setSyncBusy('');
+    }
+  };
+
+  const doPull = async () => {
+    setSyncBusy('pull');
+    try {
+      const report = await syncPullFromCloud();
+      showToast(
+        `已拉取云端档案：新增媒体 ${report.downloadedMedia} 个${report.backupPath ? '，原档案已备份' : ''}`,
+        'success'
+      );
+      await refreshRemoteMeta();
+    } catch (err: any) {
+      showToast(`拉取失败：${err?.message || err}`, 'error');
+    } finally {
+      setSyncBusy('');
+    }
+  };
+
+  const handleSyncPull = () => {
+    if (!isTauri()) {
+      showToast('云同步仅在桌面版可用', 'error');
+      return;
+    }
+    if (!currentFilePath) {
+      showToast('请先把档案保存到本地文件夹', 'error');
+      return;
+    }
+    if (!isSyncConfigured(sync)) {
+      showToast('请先填写服务器地址、账号和应用密码', 'error');
+      return;
+    }
+
+    setDialog({
+      show: true,
+      title: '从云端拉取',
+      message: `将用云端档案覆盖本机当前档案，本机会先把 project.json 备份到 .sync-backup 目录。${
+        remoteMeta
+          ? `云端版本更新于 ${formatSyncTime(remoteMeta.updatedAt)}（来自 ${remoteMeta.device}）。`
+          : ''
+      }`,
+      confirmText: '确认拉取',
+      tone: 'primary',
+      onConfirm: async () => {
+        await doPull();
+        return true;
+      },
+    });
+  };
+
+  const refreshRemoteProjects = async () => {
+    if (!isTauri()) {
+      showToast('云同步仅在桌面版可用', 'error');
+      return;
+    }
+    if (!isSyncConfigured(sync)) {
+      showToast('请先填写服务器地址、账号和应用密码', 'error');
+      return;
+    }
+    setLoadingRemoteList(true);
+    try {
+      const list = await webdavListProjects(
+        sync.server,
+        sync.username,
+        sync.password,
+        sync.remoteRoot
+      );
+      setRemoteProjects(list);
+      if (list.length === 0) showToast('云端还没有家谱备份', 'error');
+    } catch (err: any) {
+      showToast(`读取云端家谱失败：${err?.message || err}`, 'error');
+      setRemoteProjects(null);
+    } finally {
+      setLoadingRemoteList(false);
+    }
+  };
+
+  const handleRestore = (item: RemoteProject) => {
+    if (restoringDir) return;
+    const label = item.familyName || '未命名家谱';
+    setDialog({
+      show: true,
+      title: '从云端恢复家谱',
+      message: `将把「${label}」下载到本机一个新文件夹并打开，照片等媒体会一并补齐。接下来请选择保存位置。`,
+      confirmText: '选择保存位置',
+      tone: 'primary',
+      onConfirm: async () => {
+        const parent = await selectProjectParentDir(defaultSaveDir || undefined);
+        if (!parent) return false;
+        setRestoringDir(item.dir);
+        try {
+          const root = (sync.remoteRoot || 'yiranji').replace(/^\/+|\/+$/g, '');
+          const result = await restoreProjectFromCloud(
+            `${root}/${item.dir}`,
+            parent,
+            label
+          );
+          showToast(`已恢复「${label}」，补齐媒体 ${result.media} 个`, 'success');
+          navigate('/tree');
+        } catch (err: any) {
+          const msg = String(err?.message || err);
+          showToast(
+            msg.includes('PASSWORD')
+              ? '档案已下载，但有密码保护，请在首页重新打开并输入密码'
+              : `恢复失败：${msg}`,
+            'error'
+          );
+        } finally {
+          setRestoringDir('');
+        }
+        return true;
+      },
+    });
+  };
+
   // ==================== 渲染 ====================
   return (
     <div className="settings-page">
@@ -316,8 +649,11 @@ export default function SettingsPage() {
               <button className="btn btn-secondary btn-sm" onClick={closeDialog}>
                 取消
               </button>
-              <button className="btn btn-danger btn-sm" onClick={handleDialogConfirm}>
-                确认取消
+              <button
+                className={`btn ${dialog.tone === 'primary' ? 'btn-primary' : 'btn-danger'} btn-sm`}
+                onClick={handleDialogConfirm}
+              >
+                {dialog.confirmText || '确认取消'}
               </button>
             </div>
           </div>
@@ -344,6 +680,342 @@ export default function SettingsPage() {
               placeholder="请输入家谱名称"
               maxLength={50}
             />
+          </div>
+        </div>
+
+        {/* 档案存储 */}
+        <div className="settings-section">
+          <div className="settings-section-title">档案存储</div>
+          <p className="dev-tool-desc" style={{ marginBottom: '16px' }}>
+            家谱以文件夹形式实时保存（内含 project.json 与 media 照片），修改后自动写入，无需手动保存。
+          </p>
+
+          <div className="form-group">
+            <label className="form-label">当前档案位置</label>
+            <div className="path-display" title={currentFilePath || ''}>
+              {currentFilePath || (isTauri() ? '尚未保存到本地' : '浏览器模式：数据保存在浏览器本地存储中')}
+            </div>
+            <div className="path-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => handleCopyPath(currentFilePath || '')}
+                disabled={!currentFilePath}
+              >
+                📋 复制路径
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => handleOpenFolder(currentFilePath || '')}
+                disabled={!currentFilePath || !isTauri()}
+                title={isTauri() ? '在资源管理器中打开档案所在文件夹' : '仅桌面版可用'}
+              >
+                📂 打开文件夹
+              </button>
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">新建档案的默认保存位置</label>
+            <div className="path-display" title={defaultSaveDir || ''}>
+              {defaultSaveDir || '未设置（每次新建档案时弹出选择框）'}
+            </div>
+            <div className="path-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleChooseDefaultDir}
+                disabled={!isTauri()}
+                title={isTauri() ? '选择默认保存目录' : '仅桌面版可用'}
+              >
+                📁 选择文件夹
+              </button>
+              {defaultSaveDir && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={handleClearDefaultDir}
+                >
+                  恢复为每次询问
+                </button>
+              )}
+            </div>
+            {defaultSaveDir && (
+              <p className="form-hint" style={{ marginTop: '8px' }}>
+                新建家谱将自动保存在：
+                <strong style={{ color: 'var(--color-accent)' }}>{defaultSaveDir}</strong>
+              </p>
+            )}
+          </div>
+
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">迁移当前档案</label>
+            <p className="dev-tool-desc">
+              把整个档案文件夹（含全部照片、音频）复制到你选定的新位置，并自动切换到新位置。
+              原目录会保留作为备份，确认无误后可自行删除。
+            </p>
+            <div className="path-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleRelocate}
+                disabled={!currentFilePath || !isTauri() || isMoving}
+                title={isTauri() ? '选择新的保存位置并迁移' : '仅桌面版可用'}
+              >
+                {isMoving ? '⏳ 正在迁移…' : '📦 迁移到新位置…'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* 多设备同步 */}
+        <div className="settings-section" id="sync-section">
+          <div className="settings-section-title">多设备同步</div>
+          <p className="dev-tool-desc" style={{ marginBottom: '14px' }}>
+            把档案同步到支持 WebDAV 的网盘（坚果云 / InfiniCLOUD / 自建 Nextcloud），两台电脑共用同一份云端备份。
+            上传只补传云端还没有的照片，已传过的不会重复上传，免费额度也够长期用。
+            {!isTauri() && (
+              <>
+                <br />
+                <strong>网页版不支持云同步，请安装桌面版使用。</strong>
+              </>
+            )}
+          </p>
+
+          <div className="sync-preset-row">
+            <span className="sync-preset-label">快速填入：</span>
+            {WEBDAV_PRESETS.map((preset) => (
+              <button
+                key={preset.name}
+                type="button"
+                className="sync-preset-btn"
+                title={preset.hint}
+                onClick={() => patchSync({ server: preset.server })}
+              >
+                {preset.name}
+              </button>
+            ))}
+          </div>
+
+          <div className="form-group">
+            <label className="form-label" htmlFor="syncServer">服务地址</label>
+            <input
+              id="syncServer"
+              type="text"
+              className="form-input"
+              value={sync.server}
+              placeholder="https://dav.jianguoyun.com/dav/"
+              onChange={(e) => patchSync({ server: e.target.value })}
+            />
+          </div>
+
+          <div className="sync-two-col">
+            <div className="form-group">
+              <label className="form-label" htmlFor="syncUser">账号</label>
+              <input
+                id="syncUser"
+                type="text"
+                className="form-input"
+                value={sync.username}
+                placeholder="登录邮箱 / 用户名"
+                onChange={(e) => patchSync({ username: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label" htmlFor="syncPass">应用密码</label>
+              <input
+                id="syncPass"
+                type="password"
+                className="form-input"
+                value={sync.password}
+                placeholder="WebDAV 应用密码"
+                onChange={(e) => patchSync({ password: e.target.value })}
+              />
+            </div>
+          </div>
+
+          <div className="sync-two-col">
+            <div className="form-group">
+              <label className="form-label" htmlFor="syncRoot">云端根目录</label>
+              <input
+                id="syncRoot"
+                type="text"
+                className="form-input"
+                value={sync.remoteRoot}
+                placeholder="yiranji"
+                onChange={(e) => patchSync({ remoteRoot: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">本家谱的云端位置</label>
+              <div className="path-display" title={cloudDir}>
+                {cloudDir || '首次上传时自动生成'}
+              </div>
+            </div>
+          </div>
+
+          <div className="sync-status-card">
+            <div className="sync-status-line">
+              <span className="sync-status-key">云端版本</span>
+              <span className="sync-status-value">
+                {remoteMeta
+                  ? `${formatSyncTime(remoteMeta.updatedAt)} · 来自 ${remoteMeta.device} · 第 ${remoteMeta.revision} 版`
+                  : isSyncConfigured(sync)
+                    ? '尚未上传过'
+                    : '未配置'}
+              </span>
+            </div>
+            <div className="sync-status-line">
+              <span className="sync-status-key">本机档案</span>
+              <span className="sync-status-value">{formatSyncTime(project.meta.updatedAt)}</span>
+            </div>
+            {remoteMeta && remoteMeta.projectUpdatedAt > (project.meta.updatedAt || '') && (
+              <div className="sync-status-warn">⚠️ 云端比本机新，建议先「从云端拉取」再继续编辑</div>
+            )}
+          </div>
+
+          <div className="sync-actions">
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={handleSyncTest}
+              disabled={!!syncBusy || !isTauri()}
+            >
+              {syncBusy === 'test' ? '⏳ 连接中…' : '🔌 测试连接'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={handleSyncPush}
+              disabled={!!syncBusy || !isTauri()}
+            >
+              {syncBusy === 'push' ? '⏳ 上传中…' : '⬆️ 上传到云端'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={handleSyncPull}
+              disabled={!!syncBusy || !isTauri()}
+            >
+              {syncBusy === 'pull' ? '⏳ 拉取中…' : '⬇️ 从云端拉取'}
+            </button>
+          </div>
+
+          <div className="sync-options">
+            <label className="sync-check">
+              <input
+                type="checkbox"
+                checked={sync.enabled}
+                onChange={(e) => patchSync({ enabled: e.target.checked })}
+              />
+              <span>启用云同步</span>
+            </label>
+            <label className="sync-check">
+              <input
+                type="checkbox"
+                checked={sync.autoCheck}
+                onChange={(e) => patchSync({ autoCheck: e.target.checked })}
+              />
+              <span>进入家谱时检查云端更新</span>
+            </label>
+            <label className="sync-check">
+              <input
+                type="checkbox"
+                checked={sync.autoPush}
+                onChange={(e) => patchSync({ autoPush: e.target.checked })}
+              />
+              <span>保存后自动上传（约 5 秒后）</span>
+            </label>
+            <label className="sync-check">
+              <input
+                type="checkbox"
+                checked={sync.forceOverwrite}
+                onChange={(e) => patchSync({ forceOverwrite: e.target.checked })}
+              />
+              <span>允许本机覆盖云端的较新版本</span>
+            </label>
+          </div>
+
+          <p className="form-hint" style={{ marginTop: '10px' }}>
+            账号密码只保存在本机。坚果云要用「账户信息 → 安全选项 → 应用密码」生成的那串密码，不是登录密码。
+            两台电脑都开启同步后，日常只需点左侧「一键同步」，不必再来回导文件。
+          </p>
+
+          <div className="sync-restore">
+            <div className="sync-restore-head">
+              <div>
+                <strong>换电脑 / 找回云端档案</strong>
+                <span>新电脑上直接读取云端已有家谱，无需手工拷贝文件</span>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={refreshRemoteProjects}
+                disabled={loadingRemoteList || !isTauri()}
+              >
+                {loadingRemoteList ? '⏳ 读取中…' : '🔍 读取云端家谱'}
+              </button>
+            </div>
+
+            {remoteProjects && remoteProjects.length === 0 && (
+              <p className="form-hint" style={{ margin: '10px 0 0' }}>
+                云端根目录下还没有家谱备份。
+              </p>
+            )}
+
+            {remoteProjects && remoteProjects.length > 0 && (
+              <ul className="sync-restore-list">
+                {remoteProjects.map((item) => (
+                  <li key={item.dir} className="sync-restore-item">
+                    <div className="sync-restore-info">
+                      <strong>{item.familyName || '未命名家谱'}</strong>
+                      <span>
+                        {formatSyncTime(item.updatedAt)} · 来自 {item.device || '未知设备'} ·
+                        第 {item.revision} 版 · {item.mediaCount} 个媒体
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => handleRestore(item)}
+                      disabled={!!restoringDir}
+                    >
+                      {restoringDir === item.dir ? '⏳ 恢复中…' : '恢复到本机'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        {/* 数据迁移（网页版 ⇄ 桌面版） */}
+        <div className="settings-section">
+          <div className="settings-section-title">数据迁移</div>
+          <p className="dev-tool-desc" style={{ marginBottom: '16px' }}>
+            {isTauri()
+              ? '导出的 .json 只包含家谱数据（人物、关系、文字），照片 / 音视频是磁盘上的独立文件，不会被打包进去。要连同媒体一起迁移到另一台电脑，请用左侧「另存为 → YRJ」。'
+              : '网页版的数据保存在浏览器本地存储里，不是电脑上的文件。导出后在桌面版用「导入工程文件」载入，照片、音频、视频会一并还原。'}
+          </p>
+
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">导出完整工程数据</label>
+            <div className="path-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleExportProject}
+                disabled={isExportingProject}
+              >
+                {isExportingProject ? '⏳ 正在导出…' : '📤 导出工程数据 (.json)'}
+              </button>
+            </div>
+            <p className="form-hint" style={{ marginTop: '8px' }}>
+              {embeddedMediaCount > 0
+                ? `当前工程内嵌 ${embeddedMediaCount} 个媒体文件（照片 / 音频 / 视频），会一并打包进导出文件。`
+                : '当前工程没有内嵌媒体，导出文件很小。'}
+            </p>
           </div>
         </div>
 

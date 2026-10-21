@@ -15,13 +15,28 @@ import {
 import { sha256, generateAnonymizedNames } from '../utils';
 import {
   isTauri,
-  saveYrjFile,
   selectFilePathForSave,
   saveProjectJson,
   unpackYrj,
   loadProjectJson,
   packToYrj,
+  createUniqueProjectWorkspace,
+  saveMediaFile,
+  resolveWorkspaceDir,
+  writeBinaryFile,
+  webdavPush,
+  webdavPull,
+  webdavRemoteMeta,
+  type RemoteSyncMeta,
+  type SyncPushReport,
+  type SyncPullReport,
 } from '../utils/tauri';
+import {
+  extractEmbeddedMedia,
+  applyWorkspaceMediaPaths,
+  rebaseMediaPathsToWorkspace,
+} from '../utils/projectPortable';
+import { getSyncSettings, isSyncConfigured, remoteDirFor, ensureSyncKey } from '../utils/cloudSync';
 
 // ==================== 持久化工具 ====================
 
@@ -85,7 +100,59 @@ function saveRecentProjects(projects: RecentProject[]) {
   localStorage.setItem(RECENT_KEY, JSON.stringify(projects));
 }
 
+// ==================== 保存后自动上传 ====================
+
+// 连续保存（如批量导入照片）合并成一次上传，避免把带宽和云端版本号刷爆
+let autoPushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleAutoPush() {
+  if (!isTauri()) return;
+  const settings = getSyncSettings();
+  if (!settings.enabled || !settings.autoPush || !isSyncConfigured(settings)) return;
+
+  if (autoPushTimer) clearTimeout(autoPushTimer);
+  autoPushTimer = setTimeout(() => {
+    autoPushTimer = null;
+    void runAutoPush();
+  }, 5000);
+}
+
+async function runAutoPush() {
+  const state = useFamilyStore.getState();
+  const { project, currentFilePath } = state;
+  if (!project?.meta.syncKey || !currentFilePath) return;
+
+  const settings = getSyncSettings();
+  if (!settings.enabled || !settings.autoPush || !isSyncConfigured(settings)) return;
+
+  try {
+    // 云端更新时不要静默覆盖，交给界面上的提示条让用户决定
+    const remote = await webdavRemoteMeta(
+      settings.server,
+      settings.username,
+      settings.password,
+      remoteDirFor(settings, project.meta.syncKey)
+    );
+    if (remote?.projectUpdatedAt && remote.projectUpdatedAt > (project.meta.updatedAt || '')) {
+      return;
+    }
+    await state.syncPushToCloud();
+  } catch {
+    // 网络异常不应影响本地保存，静默失败
+  }
+}
+
 // ==================== Store 定义 ====================
+
+/** 一键同步的结果，供界面提示用 */
+export interface QuickSyncResult {
+  action: 'push' | 'pull' | 'none';
+  uploadedMedia?: number;
+  skippedMedia?: number;
+  downloadedMedia?: number;
+  remoteAt?: string;
+  device?: string;
+}
 
 interface FamilyStore {
   // 当前项目状态
@@ -114,11 +181,43 @@ interface FamilyStore {
     skipPasswordCheck?: boolean
   ) => Promise<boolean>;
   importProjectFromJSON: (project: FamilyProject) => Promise<string>;
+  /**
+   * 桌面版：把一份工程数据（如网页版导出的 .json）还原成工作区文件夹，
+   * 内嵌的 base64 照片/音视频会写成 media/ 下的实体文件。
+   */
+  importProjectToWorkspace: (
+    project: FamilyProject,
+    parentDir: string,
+    baseFolderName: string
+  ) => Promise<{ projectId: string; workspacePath: string; mediaCount: number }>;
   saveCustomLayout: (layout: Record<string, { x: number; y: number }>) => void;
   clearCustomLayout: () => void;
   closeProject: () => void;
   saveCurrentProject: () => Promise<void>;
   saveProjectAs: () => Promise<boolean>;
+  /** 档案已整体迁移到新的工作区目录后，切换当前指向并刷新最近列表 */
+  relocateProject: (newWorkspacePath: string) => Promise<void>;
+  /** 云同步：上传当前档案（只补传云端缺失的媒体） */
+  syncPushToCloud: () => Promise<SyncPushReport>;
+  /** 云同步：拉取云端档案（先自动备份本地 project.json） */
+  syncPullFromCloud: () => Promise<SyncPullReport>;
+  /**
+   * 一键同步：自动判断该上传还是该下载。
+   * - 云端比本机新 → 拉取
+   * - 本机比云端新 → 上传
+   * - 时间一致 → 什么都不做
+   */
+  quickSync: () => Promise<QuickSyncResult>;
+  /** 从云端某个家谱目录恢复到本机（新建工作区并打开），返回补下的媒体数量 */
+  restoreProjectFromCloud: (
+    remoteDir: string,
+    parentDir: string,
+    folderName: string
+  ) => Promise<{ media: number; workspacePath: string }>;
+  /** 检查云端是否有比本地更新的版本；无更新或未配置时返回 null */
+  checkRemoteUpdate: () => Promise<RemoteSyncMeta | null>;
+  /** 从磁盘重新载入当前工作区（同步后刷新界面用，保持 projectId 不变） */
+  reloadFromWorkspace: () => Promise<boolean>;
   loadRecentProjects: () => void;
   removeRecentProject: (projectId: string, filePath?: string) => void;
 
@@ -133,6 +232,8 @@ interface FamilyStore {
   getPerson: (id: string) => Person | undefined;
   getPersonsList: () => Person[];
   setDefaultPerspective: (id: string) => void;
+  /** 更新同辈手动排序（personId → 组内位次），同时影响树布局与称谓推导 */
+  setSiblingOrder: (order: Record<string, number>) => void;
 
   // 关系操作
   setRelation: (personId: string, relationType: string, targetId: string | null) => void;
@@ -263,7 +364,7 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
       let workspacePath = path;
 
       // 1. 如果用户打开的是 .yrj 文件包，则自动解压至同级同名的工作区文件夹下
-      if (path.endsWith('.yrj')) {
+      if (path.toLowerCase().endsWith('.yrj')) {
         const normalized = path.replace(/\\/g, '/');
         const lastSlash = normalized.lastIndexOf('/');
         const parentDir = lastSlash !== -1 ? normalized.substring(0, lastSlash) : '.';
@@ -273,12 +374,16 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
           : fileName;
 
         workspacePath = await unpackYrj(path, parentDir, folderName, password);
+      } else {
+        // 普通文件夹 / 任意 .json：先规范化成真正包含工程数据的目录
+        // （容忍用户选了上一级目录，或把导出的「某某族谱.json」直接丢进文件夹）
+        workspacePath = await resolveWorkspaceDir(path);
       }
 
       // 2. 直接以高速明文读取加载工作区下的 project.json 属性
       const json = await loadProjectJson(workspacePath);
       const rawProject = JSON.parse(json) as FamilyProject;
-      const project = migrateProjectData(rawProject);
+      let project = migrateProjectData(rawProject);
       // 从外部文件/文件夹打开时，总生成新的 projectId，避免与源项目或其他历史记录冲突
       const projectId = uuidv4();
 
@@ -293,37 +398,39 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
         }
       }
 
-      let discardedEmbeddedMedia = false;
-      for (const person of Object.values(project.persons)) {
-        if (person.avatar?.startsWith('data:')) {
-          person.avatar = undefined;
-          discardedEmbeddedMedia = true;
-        }
-
-        // 兼容旧数据 / 脱敏数据中媒体数组可能缺失的情况
-        const photos = person.photos?.filter((photo) => !photo.path.startsWith('data:')) ?? [];
-        const audioFiles = person.audioFiles?.filter((audio) => !audio.path.startsWith('data:')) ?? [];
-        const videoFiles = person.videoFiles?.filter((video) => !video.path.startsWith('data:')) ?? [];
-
-        const originalPhotosLen = person.photos?.length ?? 0;
-        const originalAudioLen = person.audioFiles?.length ?? 0;
-        const originalVideoLen = person.videoFiles?.length ?? 0;
-
-        if (
-          photos.length !== originalPhotosLen ||
-          audioFiles.length !== originalAudioLen ||
-          videoFiles.length !== originalVideoLen
-        ) {
-          person.photos = photos;
-          person.audioFiles = audioFiles;
-          person.videoFiles = videoFiles;
-          discardedEmbeddedMedia = true;
+      // 4. 内嵌的 base64 媒体（网页版工程、网页版导出的 .yrj）→ 落地成 media/ 实体文件。
+      //    以前这里直接把 base64 丢掉，会导致从网页版迁来的照片、音视频全部消失。
+      const { media } = extractEmbeddedMedia(project, { clone: false });
+      if (media.length > 0) {
+        try {
+          for (const item of media) {
+            await saveMediaFile(workspacePath, item.filename, item.dataUrl);
+          }
+          project = applyWorkspaceMediaPaths(project, workspacePath);
+          await saveProjectJson(workspacePath, JSON.stringify(project, null, 2));
+        } catch (e) {
+          console.error('还原内嵌媒体失败，保留 base64 形式:', e);
+          // 回退到原始数据：base64 在内存里仍能正常显示，且不把占位路径写回磁盘
+          project = migrateProjectData(JSON.parse(json) as FamilyProject);
         }
       }
 
-      if (discardedEmbeddedMedia) {
+      // 4.5 换电脑打开时，project.json 里仍是原电脑的绝对路径（如 C:\Users\A\...\media\photo.jpg），
+      //     必须重新指向本机工作区的 media/，否则照片、音频、视频全部显示不出来。
+      let rebasedCount = 0;
+      project = rebaseMediaPathsToWorkspace(project, workspacePath, () => {
+        rebasedCount += 1;
+      });
+      if (rebasedCount > 0) {
         await saveProjectJson(workspacePath, JSON.stringify(project, null, 2));
       }
+
+      // 兼容旧数据 / 脱敏数据中媒体数组可能缺失的情况
+      Object.values(project.persons).forEach((person) => {
+        person.photos = person.photos || [];
+        person.audioFiles = person.audioFiles || [];
+        person.videoFiles = person.videoFiles || [];
+      });
 
       // 更新最近项目，绑定解压后的工作文件夹路径
       const recent = getRecentProjects();
@@ -382,6 +489,73 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
     return projectId;
   },
 
+  importProjectToWorkspace: async (
+    rawProject: FamilyProject,
+    parentDir: string,
+    baseFolderName: string
+  ) => {
+    if (!isTauri()) {
+      throw new Error('当前为浏览器模式，导入到本地文件夹仅在桌面版可用');
+    }
+
+    // 1. 抽出所有内嵌媒体（base64），工程里的路径先替换为占位符
+    //    clone: false —— rawProject 是本进程刚解析出来的对象，直接原地处理，避免大工程内存翻倍
+    const migrated = migrateProjectData(rawProject);
+    const { project: portable, media } = extractEmbeddedMedia(migrated, { clone: false });
+
+    // 2. 建工作区（同名自动加序号，绝不覆盖已有档案）
+    let workspacePath: string;
+    try {
+      workspacePath = await createUniqueProjectWorkspace(parentDir, baseFolderName);
+    } catch (e: any) {
+      throw new Error(`创建档案文件夹失败：${e?.message || e}`);
+    }
+
+    // 3. 逐个写出媒体实体文件（失败时明确指出是哪一个，便于定位）
+    for (let i = 0; i < media.length; i++) {
+      const item = media[i];
+      try {
+        await saveMediaFile(workspacePath, item.filename, item.dataUrl);
+      } catch (e: any) {
+        throw new Error(
+          `写入媒体文件失败（第 ${i + 1}/${media.length} 个：${item.filename}）：${e?.message || e}`
+        );
+      }
+    }
+
+    // 4. 占位符 -> 工作区绝对路径
+    const project = applyWorkspaceMediaPaths(portable, workspacePath);
+    const now = new Date().toISOString();
+    project.meta = { ...project.meta, updatedAt: now };
+
+    // 5. 落盘 project.json
+    await saveProjectJson(workspacePath, JSON.stringify(project, null, 2));
+
+    // 6. 切换为当前项目并写入最近列表
+    const projectId = uuidv4();
+    const recent = getRecentProjects();
+    const filtered = recent.filter((r) => r.filePath !== workspacePath);
+    filtered.unshift({
+      familyName: project.meta.familyName,
+      surname: project.meta.surname,
+      lastOpenedAt: now,
+      projectId,
+      filePath: workspacePath,
+    });
+    saveRecentProjects(filtered.slice(0, 10));
+
+    set({
+      currentProjectId: projectId,
+      currentFilePath: workspacePath,
+      projectPassword: null,
+      project,
+      isDirty: false,
+      recentProjects: filtered.slice(0, 10),
+    });
+
+    return { projectId, workspacePath, mediaCount: media.length };
+  },
+
   saveCustomLayout: (layout: Record<string, { x: number; y: number }>) => {
     const { project } = get();
     if (!project) return;
@@ -432,6 +606,7 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
       try {
         await saveProjectJson(currentFilePath, JSON.stringify(updated, null, 2));
         set({ project: updated, isDirty: false });
+        scheduleAutoPush();
       } catch (err) {
         console.error('保存工作区 project.json 失败:', err);
         throw err;
@@ -446,25 +621,42 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
     const { project, currentFilePath, projectPassword } = get();
     if (!project) return false;
 
-    // 另存为：弹出对话框让用户指定打包好的 YRJ 文件名及保存位置
-    const defaultName = `${project.meta.familyName}.yrj`;
-    const path = await selectFilePathForSave(defaultName);
-    if (!path) return false;
-
     const updated = {
       ...project,
       meta: { ...project.meta, updatedAt: new Date().toISOString() },
     };
 
+    // 另存为文件名，默认用家谱名
+    const defaultName = `${project.meta.familyName}.yrj`;
+
+    // 网页版：没有文件系统，直接下载与原版同格式的 .yrj 单文件
+    if (!isTauri()) {
+      try {
+        const { exportYrjInBrowser } = await import('../utils/yrjBrowser');
+        await exportYrjInBrowser(updated, defaultName, projectPassword || undefined);
+        set({ project: updated, isDirty: false });
+        return true;
+      } catch (err) {
+        console.error('浏览器端打包导出 YRJ 失败:', err);
+        throw err;
+      }
+    }
+
+    // 桌面版：弹出对话框让用户指定打包好的 YRJ 文件名及保存位置
+    const path = await selectFilePathForSave(defaultName);
+    if (!path) return false;
+
     try {
-      if (isTauri() && currentFilePath) {
+      if (currentFilePath) {
         // 先确保工作区 project.json 处于最新状态
         await saveProjectJson(currentFilePath, JSON.stringify(updated, null, 2));
         // 将整个工作区目录（包括 project.json 与 media/ 照片）一并进行 ZIP 压缩加密打包导出为单文件
         await packToYrj(currentFilePath, path, projectPassword || undefined);
       } else {
-        // Web 环境下另存为退步为 YRJ 单文件下载（保持兼容）
-        await saveYrjFile(path, JSON.stringify(updated, null, 2), projectPassword || undefined);
+        // 档案还没落地到工作区（极少见）：直接用同一套容器格式写单文件
+        const { buildYrjBytes, bytesToBase64 } = await import('../utils/yrjBrowser');
+        const bytes = await buildYrjBytes(updated, projectPassword || undefined);
+        await writeBinaryFile(path, bytesToBase64(bytes));
       }
 
       set({
@@ -478,10 +670,250 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
     }
   },
 
+  relocateProject: async (newWorkspacePath: string) => {
+    const { project, currentProjectId, currentFilePath } = get();
+    if (!project || !currentProjectId) return;
+
+    const oldPath = currentFilePath || '';
+
+    // 头像/音视频在 project.json 里是绝对路径，内存中的对象也要同步改写前缀
+    let updatedProject = project;
+    if (oldPath && oldPath !== newWorkspacePath) {
+      const fromEscaped = JSON.stringify(oldPath).slice(1, -1);
+      const toEscaped = JSON.stringify(newWorkspacePath).slice(1, -1);
+      try {
+        updatedProject = JSON.parse(
+          JSON.stringify(project).split(fromEscaped).join(toEscaped)
+        ) as FamilyProject;
+      } catch (e) {
+        console.error('迁移后改写内存路径失败:', e);
+        updatedProject = project;
+      }
+    }
+
+    set({
+      project: updatedProject,
+      currentFilePath: newWorkspacePath,
+      isDirty: false,
+    });
+
+    // 最近打开列表里的路径也要指向新位置，否则下次会打开旧目录
+    const recent = getRecentProjects();
+    const target = recent.find((r) => r.projectId === currentProjectId);
+    if (target) {
+      target.filePath = newWorkspacePath;
+      saveRecentProjects(recent);
+      set({ recentProjects: recent });
+    }
+
+    if (isTauri()) {
+      // 立即在新位置落盘一次，确保 project.json 与当前内存状态一致
+      await saveProjectJson(newWorkspacePath, JSON.stringify(updatedProject, null, 2));
+    } else {
+      saveProject(currentProjectId, updatedProject);
+    }
+  },
+
+  // ==================== 云同步（WebDAV） ====================
+
+  reloadFromWorkspace: async () => {
+    const { currentFilePath } = get();
+    if (!currentFilePath || !isTauri()) return false;
+
+    const json = await loadProjectJson(currentFilePath);
+    let project = migrateProjectData(JSON.parse(json) as FamilyProject);
+    // 云端下来的档案，媒体路径是另一台电脑的绝对路径 → 重新指向本机 media/
+    project = rebaseMediaPathsToWorkspace(project, currentFilePath);
+    Object.values(project.persons || {}).forEach((person) => {
+      person.photos = person.photos || [];
+      person.audioFiles = person.audioFiles || [];
+      person.videoFiles = person.videoFiles || [];
+    });
+
+    await saveProjectJson(currentFilePath, JSON.stringify(project, null, 2));
+    set({ project, isDirty: false });
+    return true;
+  },
+
+  syncPushToCloud: async () => {
+    const { project, currentFilePath } = get();
+    if (!project) throw new Error('请先打开一个家谱');
+    if (!currentFilePath) throw new Error('当前档案还没有保存到本地文件夹，请先保存');
+
+    const settings = getSyncSettings();
+    if (!isSyncConfigured(settings)) {
+      throw new Error('请先在「多设备同步」中填写 WebDAV 地址与账号');
+    }
+
+    const { key, created } = ensureSyncKey(project);
+    if (created) {
+      set({ project: { ...project, meta: { ...project.meta, syncKey: key } } });
+    }
+
+    // 后端直接读磁盘上的 project.json 上传，先确保它是最新状态
+    const latest = get().project!;
+    await saveProjectJson(currentFilePath, JSON.stringify(latest, null, 2));
+
+    return webdavPush(
+      settings.server,
+      settings.username,
+      settings.password,
+      remoteDirFor(settings, key),
+      currentFilePath
+    );
+  },
+
+  syncPullFromCloud: async () => {
+    const { project, currentFilePath } = get();
+    if (!project || !currentFilePath) {
+      throw new Error('当前档案还没有保存到本地文件夹，请先保存');
+    }
+
+    const settings = getSyncSettings();
+    if (!isSyncConfigured(settings)) {
+      throw new Error('请先在「多设备同步」中填写 WebDAV 地址与账号');
+    }
+
+    const { key } = ensureSyncKey(project);
+    const report = await webdavPull(
+      settings.server,
+      settings.username,
+      settings.password,
+      remoteDirFor(settings, key),
+      currentFilePath
+    );
+
+    await get().reloadFromWorkspace();
+
+    // 首次从别的设备同步时，云端档案可能还没有 syncKey —— 补上并写回，保证目录映射稳定
+    const after = get().project;
+    if (after && after.meta.syncKey !== key) {
+      const updated = { ...after, meta: { ...after.meta, syncKey: key } };
+      set({ project: updated });
+      await saveProjectJson(currentFilePath, JSON.stringify(updated, null, 2));
+    }
+
+    return report;
+  },
+
+  quickSync: async () => {
+    const { project, currentFilePath } = get();
+    if (!project) throw new Error('请先打开一个家谱');
+    if (!currentFilePath) throw new Error('当前档案还没有保存到本地文件夹，请先保存');
+
+    const settings = getSyncSettings();
+    if (!settings.enabled) {
+      throw new Error('请先在「家谱设置 → 多设备同步」中勾选「启用云同步」');
+    }
+    if (!isSyncConfigured(settings)) {
+      throw new Error('请先在「多设备同步」中填写 WebDAV 地址与账号');
+    }
+
+    // 第一次同步时先把同步 ID 落盘，保证两台电脑落到同一个云端目录
+    const { key, created } = ensureSyncKey(project);
+    if (created) {
+      const withKey = { ...project, meta: { ...project.meta, syncKey: key } };
+      set({ project: withKey });
+      await saveProjectJson(currentFilePath, JSON.stringify(withKey, null, 2));
+    }
+
+    const meta = await webdavRemoteMeta(
+      settings.server,
+      settings.username,
+      settings.password,
+      remoteDirFor(settings, key)
+    );
+    const localAt = get().project?.meta.updatedAt || '';
+    const remoteAt = meta?.projectUpdatedAt || '';
+
+    if (remoteAt && remoteAt > localAt) {
+      // 直接拉取会覆盖尚未保存的编辑，先把选择权交回用户
+      if (get().isDirty) {
+        throw new Error('本机还有未保存的修改，请先「保存档案」再同步');
+      }
+      const report = await get().syncPullFromCloud();
+      return {
+        action: 'pull' as const,
+        downloadedMedia: report.downloadedMedia,
+        remoteAt: report.remote.updatedAt,
+        device: report.remote.device,
+      };
+    }
+
+    if (remoteAt && remoteAt === localAt) {
+      return {
+        action: 'none' as const,
+        remoteAt: meta?.updatedAt,
+        device: meta?.device,
+      };
+    }
+
+    const report = await get().syncPushToCloud();
+    return {
+      action: 'push' as const,
+      uploadedMedia: report.uploadedMedia,
+      skippedMedia: report.skippedMedia,
+    };
+  },
+
+  restoreProjectFromCloud: async (remoteDir, parentDir, folderName) => {
+    const settings = getSyncSettings();
+    if (!isSyncConfigured(settings)) {
+      throw new Error('请先在「多设备同步」中填写 WebDAV 地址与账号');
+    }
+
+    const workspacePath = await createUniqueProjectWorkspace(
+      parentDir,
+      folderName || '家谱'
+    );
+    const report = await webdavPull(
+      settings.server,
+      settings.username,
+      settings.password,
+      remoteDir,
+      workspacePath
+    );
+
+    // 绑定同步 ID：云端目录名就是这台家谱的 syncKey，之后两边才能对上
+    const key = remoteDir.split('/').filter(Boolean).pop() || '';
+    const json = await loadProjectJson(workspacePath);
+    const parsed = JSON.parse(json) as FamilyProject;
+    if (key && parsed.meta.syncKey !== key) {
+      parsed.meta.syncKey = key;
+      await saveProjectJson(workspacePath, JSON.stringify(parsed, null, 2));
+    }
+
+    const opened = await get().openProjectFromFile(workspacePath);
+    if (!opened) {
+      throw new Error(`云端档案已下载到 ${workspacePath}，但打开失败`);
+    }
+    return { media: report.downloadedMedia, workspacePath };
+  },
+
+  checkRemoteUpdate: async () => {
+    const { project } = get();
+    const settings = getSyncSettings();
+    if (!project?.meta.syncKey || !settings.enabled || !isSyncConfigured(settings)) return null;
+
+    try {
+      const meta = await webdavRemoteMeta(
+        settings.server,
+        settings.username,
+        settings.password,
+        remoteDirFor(settings, project.meta.syncKey)
+      );
+      if (!meta || !meta.projectUpdatedAt) return null;
+      const localAt = project.meta.updatedAt || '';
+      return meta.projectUpdatedAt > localAt ? meta : null;
+    } catch {
+      // 离线 / 服务不可用时静默失败，不打扰正常使用
+      return null;
+    }
+  },
+
   loadRecentProjects: () => {
     set({ recentProjects: getRecentProjects() });
   },
-
   // ==================== 元数据操作 ====================
 
   updateMeta: (updates: Partial<FamilyMeta>) => {
@@ -682,6 +1114,24 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
       },
       isDirty: true,
     });
+  },
+
+  setSiblingOrder: (order: Record<string, number>) => {
+    const { project } = get();
+    if (!project) return;
+
+    set({
+      project: {
+        ...project,
+        meta: {
+          ...project.meta,
+          siblingOrder: { ...order },
+          updatedAt: new Date().toISOString(),
+        },
+      },
+      isDirty: true,
+    });
+    autoSave(get);
   },
 
   // ==================== 关系操作 ====================

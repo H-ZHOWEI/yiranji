@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "26.9.30"
+version = "26.10.19"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -32,3 +32,4 @@ sha2 = "0.10"
 rfd = "0.14"
 hmac = "0.12"
 base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json", "charset"] }

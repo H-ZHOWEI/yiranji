@@ -75,6 +75,16 @@
   font-weight: 500;
 }
 
+.sidebar-nav-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sidebar-nav-item:disabled:hover {
+  background-color: transparent;
+  color: var(--color-text-secondary);
+}
+
 .sidebar-nav-item .nav-icon {
   font-size: var(--text-lg);
   width: 24px;
@@ -332,6 +342,17 @@
   line-height: 1.6;
 }
 
+/* 浏览器模式提示（网页版没有原生保存对话框） */
+.saveas-web-hint {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-accent-lighter);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
 /* 图片格式子选项：JPG / PNG */
 .saveas-image-formats {
   display: flex;
@@ -576,4 +597,57 @@
 
 .saveas-toast-close:hover {
   opacity: 1;
+}
+
+/* ==================== 云同步提示条 ==================== */
+
+/* 悬浮在页面顶部中央，不占据页面布局高度（家谱树是 100vh 布局） */
+.sync-banner {
+  position: fixed;
+  top: 12px;
+  left: calc(var(--sidebar-width) + (100vw - var(--sidebar-width)) / 2);
+  transform: translateX(-50%);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - var(--sidebar-width) - 48px);
+  padding: 7px 10px 7px 14px;
+  background-color: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-lg);
+}
+
+.sync-banner-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.sync-banner-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sync-banner-close {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background-color: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.sync-banner-close:hover {
+  background-color: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }

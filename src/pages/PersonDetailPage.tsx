@@ -14,13 +14,14 @@ import {
 } from '../utils';
 import { convertLocalSrc, isTauri, saveMediaFile, deleteMediaFile } from '../utils/tauri';
 import { lockBodyScroll } from '../utils/bodyScrollLock';
+import ImageViewer, { type ViewerImage } from '../components/ImageViewer';
 import type { Photo, VideoFile } from '../types';
 import './PersonDetailPage.css';
 
 export default function PersonDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { getPerson, getPersonsList, updatePerson, deletePerson, currentFilePath } = useFamilyStore();
+  const { getPerson, getPersonsList, updatePerson, deletePerson, currentFilePath, setDefaultPerspective } = useFamilyStore();
 
   const person = id ? getPerson(id) : undefined;
   const allPersons = getPersonsList();
@@ -32,6 +33,10 @@ export default function PersonDetailPage() {
   // 灯箱状态：照片 / 视频
   const [lightboxPhoto, setLightboxPhoto] = useState<Photo | null>(null);
   const [lightboxVideo, setLightboxVideo] = useState<VideoFile | null>(null);
+
+  // 通用图片查看器：照片墙某一张 / 头像大图
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  const [viewerAvatar, setViewerAvatar] = useState<'avatar' | 'avatarRect' | null>(null);
 
   // 自定义确认对话框
   const [dialog, setDialog] = useState<{
@@ -504,6 +509,42 @@ export default function PersonDetailPage() {
     ? person.avatarRectPhotoDate
     : person.avatarPhotoDate;
 
+  // 照片墙 → 查看器数据（保留备注与拍摄信息）
+  const photoViewerImages: ViewerImage[] = person.photos.map((photo) => {
+    const parts: string[] = [];
+    if (photo.date) parts.push(`拍摄于 ${formatDate(photo.date)}`);
+    if (photo.date && person.birthDateSolar) {
+      parts.push(calculatePhotoAge(person.birthDateSolar, photo.date));
+    }
+    return {
+      src: convertLocalSrc(photo.path),
+      caption: photo.caption || '',
+      meta: parts.join(' · '),
+      alt: photo.caption || fullName,
+    };
+  });
+
+  const avatarViewerImages: ViewerImage[] = [];
+  if (person.avatarRect) {
+    avatarViewerImages.push({
+      src: convertLocalSrc(person.avatarRect),
+      caption: `${fullName} · 形象大图`,
+      meta: person.avatarRectPhotoDate
+        ? `拍摄于 ${formatDate(person.avatarRectPhotoDate)}`
+        : '',
+      alt: fullName,
+    });
+  }
+  if (person.avatar) {
+    avatarViewerImages.push({
+      src: convertLocalSrc(person.avatar),
+      caption: `${fullName} · 圆形头像`,
+      meta: person.avatarPhotoDate ? `拍摄于 ${formatDate(person.avatarPhotoDate)}` : '',
+      alt: fullName,
+    });
+  }
+  const avatarViewerStart = viewerAvatar === 'avatar' && person.avatarRect ? 1 : 0;
+
   return (
     <div className="person-detail-page">
       {/* 头部信息 */}
@@ -514,14 +555,18 @@ export default function PersonDetailPage() {
             <img
               src={convertLocalSrc(person.avatarRect)}
               alt={fullName}
-              className="rect-avatar-img"
+              className="rect-avatar-img clickable"
+              onClick={() => setViewerAvatar('avatarRect')}
+              title="点击查看大图（可缩放）"
             />
           ) : person.avatar ? (
             // 圆形头像视图
             <img
               src={convertLocalSrc(person.avatar)}
               alt={fullName}
-              className={person.isDefaultPerspective ? 'perspective-border' : ''}
+              className={`clickable ${person.isDefaultPerspective ? 'perspective-border' : ''}`}
+              onClick={() => setViewerAvatar('avatar')}
+              title="点击查看大图（可缩放）"
             />
           ) : (
             <div className={`avatar-placeholder ${person.isDefaultPerspective ? 'perspective-border' : ''}`}>
@@ -542,7 +587,7 @@ export default function PersonDetailPage() {
               <h1 className="user-name">{fullName}</h1>
             </div>
             {person.isDefaultPerspective && (
-              <span className="role-tag">默认视角</span>
+              <span className="role-tag">主视角</span>
             )}
           </div>
 
@@ -620,6 +665,15 @@ export default function PersonDetailPage() {
             <button className="btn btn-secondary action-btn" onClick={() => navigate('/tree')}>
               <span>🌳</span> 在树中查看
             </button>
+            {!person.isDefaultPerspective && (
+              <button
+                className="btn btn-secondary action-btn"
+                onClick={() => setDefaultPerspective(person.id)}
+                title="切换后，家谱树与所有称谓都以该成员为基准"
+              >
+                <span>🧭</span> 设为主视角
+              </button>
+            )}
             <button
               className="btn btn-secondary action-btn"
               onClick={() => {
@@ -691,12 +745,12 @@ export default function PersonDetailPage() {
         <div className="detail-section-header">
           <div className="detail-section-title">照片</div>
           {person.photos.length > 0 && (
-            <span className="detail-section-hint">点击照片可放大查看并编辑备注</span>
+            <span className="detail-section-hint">点击照片全屏查看，支持缩放 / 拖拽 / 左右切换</span>
           )}
         </div>
         {person.photos.length > 0 ? (
           <div className="photo-grid">
-            {person.photos.map((photo) => (
+            {person.photos.map((photo, photoIndex) => (
               <div key={photo.id} className="photo-grid-item">
                 <button
                   type="button"
@@ -712,7 +766,7 @@ export default function PersonDetailPage() {
                 <button
                   type="button"
                   className="photo-grid-item-inner"
-                  onClick={() => setLightboxPhoto(photo)}
+                  onClick={() => setViewerIndex(photoIndex)}
                   title="点击查看大图"
                 >
                   <img src={convertLocalSrc(photo.path)} alt={photo.caption || ''} />
@@ -880,6 +934,32 @@ export default function PersonDetailPage() {
           video={lightboxVideo}
           onClose={() => setLightboxVideo(null)}
           onSave={handleSaveVideoMeta}
+        />
+      )}
+
+      {/* 通用图片查看器：照片墙（可左右切换、缩放） */}
+      {viewerIndex !== null && photoViewerImages.length > 0 && (
+        <ImageViewer
+          images={photoViewerImages}
+          startIndex={viewerIndex}
+          title="照片"
+          editNoteLabel="编辑备注"
+          onEditNote={(i) => {
+            const target = person.photos[i];
+            setViewerIndex(null);
+            if (target) setLightboxPhoto(target);
+          }}
+          onClose={() => setViewerIndex(null)}
+        />
+      )}
+
+      {/* 通用图片查看器：头像 / 形象照 */}
+      {viewerAvatar !== null && avatarViewerImages.length > 0 && (
+        <ImageViewer
+          images={avatarViewerImages}
+          startIndex={avatarViewerStart}
+          title={viewerAvatar === 'avatarRect' ? '形象大图' : '头像'}
+          onClose={() => setViewerAvatar(null)}
         />
       )}
     </div>
