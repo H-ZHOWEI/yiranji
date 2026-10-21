@@ -14,6 +14,8 @@ import {
 } from '../utils/tauri';
 import { getDefaultSaveDir } from '../utils/appPrefs';
 import { isValidProjectShape, safeFolderName } from '../utils/projectPortable';
+import { type TitleStyle } from '../utils/kinship';
+import TitleStylePicker from '../components/TitleStylePicker';
 import './WelcomePage.css';
 
 export default function WelcomePage() {
@@ -32,6 +34,8 @@ export default function WelcomePage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [surname, setSurname] = useState('');
   const [familyName, setFamilyName] = useState('');
+  // 称谓地域习惯：新建时选择，之后可在设置页修改
+  const [titleStyle, setTitleStyle] = useState<TitleStyle>('north');
   const [password, setPassword] = useState('');
   // 新建档案的父目录：优先使用"设置 → 档案存储"里配置的默认位置
   const [selectedParentDir, setSelectedParentDir] = useState(() => getDefaultSaveDir());
@@ -118,10 +122,15 @@ export default function WelcomePage() {
       return;
     }
 
-    await doCreate(surname.trim(), finalFamilyName);
+    await doCreate(surname.trim(), finalFamilyName, undefined, titleStyle);
   };
 
-  const doCreate = async (surnameVal: string, finalFamilyName: string, pwd?: string) => {
+  const doCreate = async (
+    surnameVal: string,
+    finalFamilyName: string,
+    pwd?: string,
+    style: TitleStyle = 'north'
+  ) => {
     let workspacePath: string | undefined = undefined;
     if (isTauri()) {
       // 未显式选择时，回退到设置里的默认保存位置，避免"必须先选目录"的拦路提示
@@ -151,7 +160,8 @@ export default function WelcomePage() {
       surnameVal,
       pwd || undefined,
       workspacePath,
-      finalFamilyName
+      finalFamilyName,
+      style
     );
     if (projectId) {
       setShowCreateModal(false);
@@ -679,6 +689,15 @@ export default function WelcomePage() {
               )}
 
               <div className="form-group">
+                <label className="form-label">称谓习惯</label>
+                <p className="form-hint" style={{ marginBottom: '10px', color: 'var(--color-text-secondary)' }}>
+                  同样的亲戚，各地叫法不同。先选大方向，再挑一个更贴近你们家的细分地区；
+                  之后随时可以在「设置 → 称谓习惯」里改。
+                </p>
+                <TitleStylePicker value={titleStyle} onChange={setTitleStyle} />
+              </div>
+
+              <div className="form-group">
                 <label className="form-label">访问密码（可选）</label>
                 <input
                   type="text"
@@ -773,7 +792,7 @@ export default function WelcomePage() {
               </button>
               <button className="btn btn-primary" onClick={() => {
                 setShowPwdConfirmDialog(false);
-                doCreate(surname.trim(), familyName.trim() || `${surname.trim()}氏-以苒纪`, pendingCreatePwd);
+                doCreate(surname.trim(), familyName.trim() || `${surname.trim()}氏-以苒纪`, pendingCreatePwd, titleStyle);
               }}>
                 确认创建
               </button>

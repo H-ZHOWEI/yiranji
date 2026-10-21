@@ -120,13 +120,14 @@ function PersonNode({ data }: { data: PersonNodeData }) {
     perspectiveId,
     personsMap,
     project?.meta.siblingOrder,
-    project?.meta.siblingSeniority
+    project?.meta.siblingSeniority,
+    project?.meta.titleStyle
   );
   // 反向称谓：主视角该叫此人什么（用于"他叫我 X"）
   const isPerspectiveSelf = !!perspectiveId && person.id === perspectiveId;
   const reverseRelationText =
     !isPerspectiveSelf && perspectiveId
-      ? getRelationshipText(perspectiveId, person.id, personsMap, project?.meta.siblingOrder, project?.meta.siblingSeniority)
+      ? getRelationshipText(perspectiveId, person.id, personsMap, project?.meta.siblingOrder, project?.meta.siblingSeniority, project?.meta.titleStyle)
       : '';
   const selfPronoun = person.gender === 'male' ? '他' : '她';
   const perspectivePronoun =
@@ -146,6 +147,8 @@ function PersonNode({ data }: { data: PersonNodeData }) {
   const [editY, setEditY] = useState('');
   // 头像大图查看
   const [avatarViewerOpen, setAvatarViewerOpen] = useState(false);
+  // 头像单击延迟句柄：用于区分"单击看大图"与"双击进详情"
+  const avatarClickTimerRef = useRef<number | null>(null);
 
   // 节点被拖拽时，若非编辑态，则自动更新输入框中的预设值
   useEffect(() => {
@@ -266,9 +269,22 @@ function PersonNode({ data }: { data: PersonNodeData }) {
         onClick={(e) => {
           if (!person.avatar) return;
           e.stopPropagation();
-          setAvatarViewerOpen(true);
+          // 延迟打开大图：若紧接着发生双击（用户想进详情页），就取消这次单击
+          if (avatarClickTimerRef.current) window.clearTimeout(avatarClickTimerRef.current);
+          avatarClickTimerRef.current = window.setTimeout(() => {
+            avatarClickTimerRef.current = null;
+            setAvatarViewerOpen(true);
+          }, 220);
         }}
-        onDoubleClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => {
+          // 头像上双击 = 打开人物详情（不再吞掉双击事件）
+          e.stopPropagation();
+          if (avatarClickTimerRef.current) {
+            window.clearTimeout(avatarClickTimerRef.current);
+            avatarClickTimerRef.current = null;
+          }
+          navigate(`/person/${person.id}`);
+        }}
       >
         {person.avatar ? (
           <img src={convertLocalSrc(person.avatar)} alt={fullName} />
@@ -464,10 +480,19 @@ function ParentLabeledEdge({
   const dOther = Math.abs(targetX - otherX);
   const isJunction = dSelf < dOther || (dSelf === dOther && sourceX <= otherX);
 
+  // 本条边是否正处于高亮状态（选中/悬停成员时，父母→子女的连线会被染成荧光色）。
+  // 自定义边组件拿不到 className prop，只能从 store 里按 id 查。
+  const edgeClassName =
+    useStore((s) => s.edges.find((e) => e.id === id)?.className) || '';
+  const emphasized = typeof edgeClassName === 'string' && edgeClassName.includes('edge-flow');
+
   // 横杠只画一次：junction 边画完整路径；远端家长的边在 junction 竖线处截断。
+  // 但**高亮时远端边必须画完整**——否则选中母亲时，蓝线会在父亲竖线处断掉，
+  // 看起来"没连到孩子卡片上"，所以高亮优先级高于截断。
   // 自绘失败（异常布局）时回退为原生完整路径。
   const junctionX = isJunction ? sourceX : otherX;
-  const path = buildParentStepPath(sourceX, sourceY, targetX, targetY, isJunction ? null : junctionX)
+  const shouldCut = !isJunction && !emphasized;
+  const path = buildParentStepPath(sourceX, sourceY, targetX, targetY, shouldCut ? junctionX : null)
     ?? getSmoothStepPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })[0];
 
   const stroke = (style?.stroke as string) || '#b1b1b7';
@@ -1847,7 +1872,8 @@ function TreePageContent() {
           project?.meta.defaultPerspectiveId,
           project?.persons || {},
           project?.meta.siblingOrder,
-          project?.meta.siblingSeniority
+          project?.meta.siblingSeniority,
+          project?.meta.titleStyle
         );
         return name.includes(pickerKeyword) || rel.includes(pickerKeyword);
       })
@@ -1885,7 +1911,8 @@ function TreePageContent() {
               project?.meta.defaultPerspectiveId,
               project?.persons || {},
               siblingOrder,
-              siblingSeniority
+              siblingSeniority,
+              project?.meta.titleStyle
             ),
       seniority: siblingSeniority?.[p.id],
       bornLabel: p.birthDateSolar ? p.birthDateSolar.slice(0, 10) : '出生日期未知',
@@ -2183,7 +2210,8 @@ function TreePageContent() {
                       project?.meta.defaultPerspectiveId,
                       project?.persons || {},
                       project?.meta.siblingOrder,
-                      project?.meta.siblingSeniority
+                      project?.meta.siblingSeniority,
+                      project?.meta.titleStyle
                     );
                 return (
                   <button

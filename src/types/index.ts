@@ -1,5 +1,9 @@
 // 以苒纪 — 核心类型定义
 
+import type { TitleDialect } from '../utils/kinship';
+
+export type { TitleDialect };
+
 // ==================== 基础类型 ====================
 
 export type Gender = 'male' | 'female';
@@ -150,6 +154,13 @@ export interface FamilyMeta {
    * 等）会优先采用该标记，未标记的人仍按排序位次判断。
    */
   siblingSeniority?: Record<string, 'elder' | 'younger'>;
+  /**
+   * 称谓地域习惯：'north' / 'south' 为两大方向，另外细分
+   * 'dongbei' / 'jin' / 'xibei'（北方）与 'yue' / 'ke' / 'min' / 'wu' / 'xiang'（南方）。
+   * 影响「姥爷/姥姥 ↔ 外公/外婆 ↔ 阿公/阿嫲、姑父 ↔ 姑丈、儿媳 ↔ 新妇」等用词，
+   * 未设置时按通用北方显示。
+   */
+  titleStyle?: TitleDialect;
   /**
    * 云同步标识：每个家谱一个稳定 ID，云端用它区分子目录。
    * 不随导入/另存改变，因此两台电脑能定位到同一份云端档案。

@@ -15,6 +15,8 @@ import {
   type SyncSettings,
 } from '../utils/cloudSync';
 import { checkForUpdate } from '../utils/updateChecker';
+import { TITLE_STYLE_SAMPLES } from '../utils/kinship';
+import TitleStylePicker from '../components/TitleStylePicker';
 import { useUpdateStore } from '../store/updateStore';
 import { createAnonymizedExport, sha256 } from '../utils';
 import './SettingsPage.css';
@@ -718,7 +720,7 @@ export default function SettingsPage() {
         <div className="settings-section">
           <div className="settings-section-title">家谱树显示</div>
           <p className="dev-tool-desc" style={{ marginBottom: '16px' }}>
-            选择家谱树亲子连线的显示方式。切换后回到家谱树页面即可生效，仅影响显示，不改动任何人物数据。
+            两套家谱树页面并存，切换后回到家谱树即可生效，仅影响显示，不改动任何人物数据。
           </p>
 
           <div className="tree-mode-options">
@@ -731,9 +733,9 @@ export default function SettingsPage() {
                 onChange={() => handleTreeModeChange('classic')}
               />
               <span className="tree-mode-text">
-                <span className="tree-mode-name">经典模式</span>
+                <span className="tree-mode-name">原版</span>
                 <span className="tree-mode-desc">
-                  原版连线：生父、生母各画一条完整连线，选中成员时在连线中点显示「生父 / 生母」称呼。
+                  完全沿用作者原版的家谱树页面：原来的卡片样式、布局算法与连线（生父、生母各一条完整连线），不附加任何额外功能。
                 </span>
               </span>
             </label>
@@ -747,13 +749,29 @@ export default function SettingsPage() {
                 onChange={() => handleTreeModeChange('enhanced')}
               />
               <span className="tree-mode-text">
-                <span className="tree-mode-name">增强模式</span>
+                <span className="tree-mode-name">新版</span>
                 <span className="tree-mode-desc">
-                  「生父 / 生母」称呼固定贴在对应家长卡片下方，子女再远也能一眼对上人；父母双方的横线只画一次，选中成员时不会出现虚线与虚线重叠补成的"假实线"。
+                  在原版基础上改进：「生父 / 生母」称呼贴在家长卡片下方；父母双方横线只画一次，不会出现虚线重叠补成的"假实线"；另外提供同辈排序与长幼标记。
                 </span>
               </span>
             </label>
           </div>
+        </div>
+
+        {/* 称谓习惯（南北大方向 + 小地区细分） */}
+        <div className="settings-section">
+          <div className="settings-section-title">称谓习惯</div>
+          <p className="dev-tool-desc" style={{ marginBottom: '16px' }}>
+            同一位亲戚，各地叫法不同。先选大方向（北方 / 南方），再选更贴近你们家的细分地区；
+            选好后，家谱树、成员列表、详情页与导出的家谱图里的称呼会一起按该习惯显示。
+          </p>
+          <TitleStylePicker
+            value={project?.meta.titleStyle || 'north'}
+            onChange={(key) => {
+              updateMeta({ titleStyle: key });
+              showToast(`已切换为${TITLE_STYLE_SAMPLES[key].name}`, 'success');
+            }}
+          />
         </div>
 
         {/* 档案存储 */}

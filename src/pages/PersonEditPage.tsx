@@ -149,6 +149,9 @@ export default function PersonEditPage() {
   const [lBirthIsLeap, setLBirthIsLeap] = useState<boolean>(false);
   const [lBirthDay, setLBirthDay] = useState<number>(1);
 
+  // 逝世日期未知：年代久远者只知道已故、不知道具体日期，勾选后不保存逝世日期
+  const [deathUnknown, setDeathUnknown] = useState(false);
+
   // 逝世：公历状态
   const [sDeathYear, setSDeathYear] = useState<number>(2020);
   const [sDeathMonth, setSDeathMonth] = useState<number>(1);
@@ -312,6 +315,8 @@ export default function PersonEditPage() {
       setGivenName(existingPerson.givenName);
       setGender(existingPerson.gender);
       setIsAlive(existingPerson.isAlive);
+      // 已故但没有逝世日期 → 视为"逝世日期未知"
+      setDeathUnknown(!existingPerson.isAlive && !existingPerson.deathDateSolar);
       // 拆分出生地字符串到多级下拉框 + 详细地址
       const parts = (existingPerson.birthPlace || '').split(' ');
       setPlaceProvince(parts[0] || '');
@@ -684,7 +689,7 @@ export default function PersonEditPage() {
     // 拼出公历逝世日期
     let deathDateSolar: string | undefined = undefined;
     let deathTimePrecision: 'date' | 'time' = 'date';
-    if (!isAlive) {
+    if (!isAlive && !deathUnknown) {
       const dYearStr = String(sDeathYear).padStart(4, '0');
       const dMonthStr = String(sDeathMonth).padStart(2, '0');
       const dDayStr = String(sDeathDay).padStart(2, '0');
@@ -1573,6 +1578,26 @@ export default function PersonEditPage() {
         {/* 逝世日期公历选择 */}
         {!isAlive && (
           <div className="form-group">
+            {/* 逝世日期未知开关 */}
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={deathUnknown}
+                  onChange={(e) => setDeathUnknown(e.target.checked)}
+                  style={{ width: '18px', height: '18px', accentColor: 'var(--color-accent)' }}
+                />
+                <span style={{ fontSize: '15px', fontWeight: '500' }}>逝世日期未知</span>
+              </label>
+              {deathUnknown && (
+                <div style={{ marginTop: '6px', fontSize: '13px', color: 'var(--color-text-tertiary)' }}>
+                  只知道已故、无法确定具体逝世日期时勾选。勾选后不保存逝世日期，仅保留"已故"状态。
+                </div>
+              )}
+            </div>
+
+            {!deathUnknown && (
+            <>
             <label className="form-label">逝世日期（公历）</label>
             <div className="date-group" style={{ padding: '16px', background: 'var(--color-bg-input)', borderRadius: 'var(--radius-md)' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'center' }}>
@@ -1655,6 +1680,8 @@ export default function PersonEditPage() {
                 </div>
               </div>
             </div>
+            </>
+            )}
           </div>
         )}
 

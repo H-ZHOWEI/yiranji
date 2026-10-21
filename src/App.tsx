@@ -8,7 +8,8 @@ import { useUpdateStore } from './store/updateStore';
 import './index.css';
 
 // 页面级代码分割：各页面按需加载，减小首屏 bundle 体积
-const TreePage = lazy(() => import('./pages/TreePage'));
+// 家谱树按「显示模式」在作者原版页面与改良版页面之间切换
+const TreePage = lazy(() => import('./pages/TreePageEntry'));
 const PersonsPage = lazy(() => import('./pages/PersonsPage'));
 const PersonEditPage = lazy(() => import('./pages/PersonEditPage'));
 const PersonDetailPage = lazy(() => import('./pages/PersonDetailPage'));

@@ -7,6 +7,7 @@ import type {
   FamilyMeta,
   Person,
   RecentProject,
+  TitleDialect,
 } from '../types';
 import {
   createDefaultPerson,
@@ -172,7 +173,8 @@ interface FamilyStore {
     surname: string,
     password?: string,
     filePath?: string,
-    customFamilyName?: string
+    customFamilyName?: string,
+    titleStyle?: TitleDialect
   ) => Promise<string>;
   openProject: (projectId: string) => boolean;
   openProjectFromFile: (
@@ -264,7 +266,8 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
     surname: string,
     password?: string,
     filePath?: string,
-    customFamilyName?: string
+    customFamilyName?: string,
+    titleStyle?: TitleDialect
   ) => {
     const projectId = uuidv4();
     const now = new Date().toISOString();
@@ -273,6 +276,7 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
     const meta: FamilyMeta = {
       ...makeDefaultMeta(surname),
       familyName: customFamilyName || `${surname}氏-以苒纪`,
+      titleStyle: titleStyle || 'north',
       hasPassword: !!password,
       passwordHash,
       createdAt: now,

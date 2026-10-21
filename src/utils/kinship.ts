@@ -193,6 +193,293 @@ function olderThan(a: any, b: any, order?: SiblingOrderMap, seniority?: Seniorit
   return compareSiblings(a, b, order, seniority) < 0;
 }
 
+// ==================== 称谓地域习惯（南北方 + 小地区细分） ====================
+
+/** 大方向：north=北方，south=南方 */
+export type TitleRegion = 'north' | 'south';
+
+/**
+ * 具体称谓方案 = 大方向 + 小地区。
+ * 直接存在 meta.titleStyle 上；历史数据里的 'north' / 'south' 仍是最基础的两档，天然兼容。
+ */
+export type TitleDialect =
+  | 'north' | 'dongbei' | 'jin' | 'xibei'
+  | 'south' | 'yue' | 'ke' | 'min' | 'wu' | 'xiang';
+
+/** 兼容旧命名（外部还在用 TitleStyle 这个类型名） */
+export type TitleStyle = TitleDialect;
+
+export interface TitleDialectInfo {
+  name: string;
+  desc: string;
+  /** 展示用的叫法样例：[关系, 叫法] */
+  examples: Array<[string, string]>;
+}
+
+/**
+ * 书面称谓 → 口语词条。
+ * 替换时按"词条长度从长到短"依次进行：先命中「外曾祖父」，再命中「祖父」，
+ * 因此 外祖父→姥爷 之后不会再被 祖父→爷爷 二次污染。
+ * 未列出的称谓（父亲/母亲/儿子/女儿/丈夫/妻子 等）各地差别很小，保持书面写法。
+ */
+type WordPair = [string, string];
+
+/** 北方通用 */
+const WORDS_NORTH: WordPair[] = [
+  ['外高祖父', '老太姥爷'], ['外高祖母', '老太姥姥'],
+  ['外曾祖父', '太姥爷'], ['外曾祖母', '太姥姥'],
+  ['外祖父', '姥爷'], ['外祖母', '姥姥'],
+  ['曾祖父', '太爷爷'], ['曾祖母', '太奶奶'],
+  ['高祖父', '老太爷爷'], ['高祖母', '老太奶奶'],
+  ['祖父', '爷爷'], ['祖母', '奶奶'],
+  ['伯父', '伯伯'], ['叔父', '叔叔'],
+  ['婶母', '婶婶'], ['姑母', '姑妈'],
+  ['舅父', '舅舅'], ['舅母', '舅妈'], ['姨母', '姨妈'],
+  ['弟媳', '弟妹'], ['儿媳', '儿媳妇'],
+  ['堂兄', '堂哥'], ['表兄', '表哥'],
+];
+
+/** 南方通用 */
+const WORDS_SOUTH: WordPair[] = [
+  ['外高祖父', '太外公'], ['外高祖母', '太外婆'],
+  ['外曾祖父', '太外公'], ['外曾祖母', '太外婆'],
+  ['外祖父', '外公'], ['外祖母', '外婆'],
+  ['曾祖父', '太爷爷'], ['曾祖母', '太奶奶'],
+  ['高祖父', '老太爷爷'], ['高祖母', '老太奶奶'],
+  ['祖父', '爷爷'], ['祖母', '奶奶'],
+  ['伯父', '伯伯'], ['叔父', '叔叔'],
+  ['婶母', '婶婶'], ['姑母', '姑妈'],
+  ['姑父', '姑丈'], ['姨父', '姨丈'],
+  ['舅父', '舅舅'], ['舅母', '舅妈'], ['姨母', '姨妈'],
+  ['儿媳', '儿媳妇'],
+  ['堂兄', '堂哥'], ['表兄', '表哥'],
+];
+
+/** 在基础上覆盖若干词条（后写的优先） */
+function extendWords(base: WordPair[], extra: WordPair[]): WordPair[] {
+  const box = new Map<string, string>(base);
+  for (const [from, to] of extra) box.set(from, to);
+  // 长词优先，避免「祖父」抢在「外曾祖父」前面命中
+  return Array.from(box.entries()).sort((a, b) => b[0].length - a[0].length);
+}
+
+/** 各地叫法差异（只在已确认有区别的词条上覆盖） */
+const WORD_OVERRIDES: Record<TitleDialect, WordPair[]> = {
+  north: WORDS_NORTH,
+  south: WORDS_SOUTH,
+  // 东北：连襟叫"一担挑"，姑母叫"姑姑"
+  dongbei: extendWords(WORDS_NORTH, [
+    ['连襟', '一担挑'],
+    ['姑母', '姑姑'],
+  ]),
+  // 晋语（山西及周边）：伯父叫"大爷"，妯娌叫"先后"
+  jin: extendWords(WORDS_NORTH, [
+    ['伯父', '大爷'],
+    ['妯娌', '先后'],
+  ]),
+  // 西北（陕甘宁青）：连襟叫"挑担"，妯娌叫"先后"
+  xibei: extendWords(WORDS_NORTH, [
+    ['连襟', '挑担'],
+    ['妯娌', '先后'],
+  ]),
+  // 粤语（广府）
+  yue: extendWords(WORDS_SOUTH, [
+    ['伯祖父', '伯公'], ['叔祖父', '叔公'], ['姑祖母', '姑婆'],
+    ['伯祖母', '伯婆'], ['叔祖母', '叔婆'],
+    ['舅外祖父', '舅公'], ['姨外祖母', '姨婆'], ['姑外祖母', '姑婆'],
+    ['曾祖父', '太公'], ['曾祖母', '太婆'],
+    ['高祖父', '老太公'], ['高祖母', '老太婆'],
+    ['祖父', '阿公'], ['祖母', '阿嫲'],
+    ['伯父', '阿伯'], ['叔父', '阿叔'],
+    ['伯母', '伯娘'], ['婶母', '阿婶'],
+    ['姑母', '姑姐'], ['舅母', '妗母'], ['姨母', '阿姨'],
+    ['哥哥', '阿哥'], ['姐姐', '家姐'], ['弟弟', '细佬'], ['妹妹', '细妹'],
+    ['嫂子', '阿嫂'],
+    ['儿媳', '新妇'], ['弟媳', '弟妇'],
+    ['侄子', '侄仔'], ['外甥', '甥仔'], ['外甥女', '甥女'],
+    ['孙子', '孙仔'],
+    ['公公', '家公'], ['婆婆', '家婆'], ['岳父', '外父'], ['岳母', '外母'],
+    ['大伯子', '大伯'], ['小叔子', '叔仔'],
+    ['大姑子', '姑奶'], ['小姑子', '姑仔'],
+    ['大舅子', '大舅'], ['小舅子', '舅仔'],
+    ['大姨子', '大姨'], ['小姨子', '姨仔'],
+  ]),
+  // 客家
+  ke: extendWords(WORDS_SOUTH, [
+    ['伯祖父', '伯公'], ['叔祖父', '叔公'], ['姑祖母', '姑婆'],
+    ['伯祖母', '伯婆'], ['叔祖母', '叔婆'],
+    ['舅外祖父', '舅公'], ['姨外祖母', '姨婆'], ['姑外祖母', '姑婆'],
+    ['曾祖父', '太公'], ['曾祖母', '太婆'],
+    ['祖父', '阿公'], ['祖母', '阿婆'],
+    ['伯父', '阿伯'], ['叔父', '阿叔'],
+    ['伯母', '伯娘'], ['婶母', '阿婶'],
+    ['姑母', '阿姑'], ['舅母', '妗婆'], ['姨母', '阿姨'],
+    ['儿媳', '新妇'],
+    ['侄子', '侄仔'], ['外甥', '甥仔'], ['外甥女', '甥女'],
+    ['公公', '家公'], ['婆婆', '家婆'],
+  ]),
+  // 闽语（闽南 / 潮汕 / 台湾）
+  min: extendWords(WORDS_SOUTH, [
+    ['伯祖父', '伯公'], ['叔祖父', '叔公'], ['姑祖母', '姑婆'],
+    ['伯祖母', '伯婆'], ['叔祖母', '叔婆'],
+    ['舅外祖父', '舅公'], ['姨外祖母', '姨婆'], ['姑外祖母', '姑婆'],
+    ['曾祖父', '太公'], ['曾祖母', '太嫲'],
+    ['祖父', '阿公'], ['祖母', '阿嫲'],
+    ['伯父', '阿伯'], ['叔父', '阿叔'],
+    ['伯母', '阿姆'], ['婶母', '阿婶'],
+    ['姑母', '阿姑'], ['舅父', '阿舅'], ['舅母', '妗婆'],
+    ['姨母', '阿姨'],
+    ['儿媳', '新妇'],
+    ['侄子', '侄仔'], ['外甥', '甥仔'], ['外甥女', '甥女'],
+  ]),
+  // 吴语（江浙沪）
+  wu: extendWords(WORDS_SOUTH, [
+    ['孙女', '孙囡'], ['外孙女', '外孙囡'], ['侄女', '侄囡'],
+    ['儿媳', '新妇'],
+    ['连襟', '挑担'],
+  ]),
+  // 湘语（湖南）
+  xiang: extendWords(WORDS_SOUTH, [
+    ['祖母', '娭毑'],
+    ['伯祖母', '伯婆'], ['叔祖母', '叔婆'], ['姑祖母', '姑婆'],
+  ]),
+};
+
+/** 各大方向下的可选项与展示文案 */
+export const TITLE_REGIONS: Array<{
+  id: TitleRegion;
+  name: string;
+  desc: string;
+  /** 切到大方向时默认选中的细分方案 */
+  fallback: TitleDialect;
+  dialects: TitleDialect[];
+}> = [
+  {
+    id: 'north',
+    name: '北方',
+    desc: '姥爷 / 姥姥、姑父 / 姨父 一路的叫法',
+    fallback: 'north',
+    dialects: ['north', 'dongbei', 'jin', 'xibei'],
+  },
+  {
+    id: 'south',
+    name: '南方',
+    desc: '外公 / 外婆、姑丈 / 姨丈 一路的叫法',
+    fallback: 'south',
+    dialects: ['south', 'yue', 'ke', 'min', 'wu', 'xiang'],
+  },
+];
+
+/** 每个具体方案的名称 / 说明 / 示例（新建家谱、设置页展示用） */
+export const TITLE_STYLE_SAMPLES: Record<TitleDialect, TitleDialectInfo> = {
+  north: {
+    name: '通用北方',
+    desc: '华北、东北一带的通行叫法',
+    examples: [
+      ['祖父', '爷爷'], ['祖母', '奶奶'],
+      ['外祖父', '姥爷'], ['外祖母', '姥姥'],
+      ['伯父', '伯伯'], ['伯母', '伯母'],
+    ],
+  },
+  dongbei: {
+    name: '东北',
+    desc: '在通用北方之上：姑母叫"姑姑"、连襟叫"一担挑"',
+    examples: [
+      ['外祖父', '姥爷'], ['外祖母', '姥姥'],
+      ['姑母', '姑姑'], ['婶母', '婶婶'], ['连襟', '一担挑'],
+    ],
+  },
+  jin: {
+    name: '晋语（山西一带）',
+    desc: '在通用北方之上：伯父叫"大爷"、妯娌叫"先后"',
+    examples: [
+      ['祖父', '爷爷'], ['伯父', '大爷'],
+      ['叔父', '叔叔'], ['妯娌', '先后'],
+    ],
+  },
+  xibei: {
+    name: '西北（陕甘宁青）',
+    desc: '在通用北方之上：连襟叫"挑担"、妯娌叫"先后"',
+    examples: [
+      ['外祖父', '姥爷'], ['舅母', '舅妈'],
+      ['连襟', '挑担'], ['妯娌', '先后'],
+    ],
+  },
+  south: {
+    name: '通用南方',
+    desc: '江南、华中一带的通行叫法',
+    examples: [
+      ['祖父', '爷爷'], ['祖母', '奶奶'],
+      ['外祖父', '外公'], ['外祖母', '外婆'],
+      ['姑父', '姑丈'], ['姨父', '姨丈'],
+    ],
+  },
+  yue: {
+    name: '粤语（广府）',
+    desc: '祖父叫"阿公"、祖母叫"阿嫲"、儿媳叫"新妇"、公公叫"家公"',
+    examples: [
+      ['祖父', '阿公'], ['祖母', '阿嫲'],
+      ['伯父', '阿伯'], ['舅母', '妗母'],
+      ['儿媳', '新妇'], ['公公', '家公'],
+    ],
+  },
+  ke: {
+    name: '客家',
+    desc: '祖父叫"阿公"、祖母叫"阿婆"、舅母叫"妗婆"、儿媳叫"新妇"',
+    examples: [
+      ['祖父', '阿公'], ['祖母', '阿婆'],
+      ['伯母', '伯娘'], ['舅母', '妗婆'],
+      ['儿媳', '新妇'], ['婆婆', '家婆'],
+    ],
+  },
+  min: {
+    name: '闽语（闽南 / 潮汕）',
+    desc: '祖母叫"阿嫲"、舅父叫"阿舅"、舅母叫"妗婆"、儿媳叫"新妇"',
+    examples: [
+      ['祖父', '阿公'], ['祖母', '阿嫲'],
+      ['舅父', '阿舅'], ['舅母', '妗婆'],
+      ['儿媳', '新妇'], ['伯母', '阿姆'],
+    ],
+  },
+  wu: {
+    name: '吴语（江浙沪）',
+    desc: '儿媳叫"新妇"、孙女叫"孙囡"、连襟叫"挑担"',
+    examples: [
+      ['外祖父', '外公'], ['外祖母', '外婆'],
+      ['儿媳', '新妇'], ['孙女', '孙囡'],
+      ['侄女', '侄囡'], ['连襟', '挑担'],
+    ],
+  },
+  xiang: {
+    name: '湘语（湖南）',
+    desc: '在通用南方之上：祖母叫"娭毑"',
+    examples: [
+      ['祖母', '娭毑'], ['祖父', '爷爷'],
+      ['外祖母', '外婆'], ['姑父', '姑丈'],
+    ],
+  },
+};
+
+/** 方案 → 所属大方向 */
+export function dialectRegion(dialect: TitleDialect): TitleRegion {
+  return dialect === 'north' || dialect === 'dongbei' || dialect === 'jin' || dialect === 'xibei'
+    ? 'north'
+    : 'south';
+}
+
+/** 按地域习惯替换称谓用词（未传或未收录时原样返回） */
+export function localizeTitle(title: string, dialect?: TitleDialect): string {
+  if (!title || !dialect) return title;
+  const pairs = WORD_OVERRIDES[dialect];
+  if (!pairs) return title;
+  let out = title;
+  for (const [from, to] of pairs) {
+    if (from === to) continue;
+    if (out.includes(from)) out = out.split(from).join(to);
+  }
+  return out;
+}
+
 const CHINESE_RANK = ['大', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
 
 function collectParentKeys(r: any): string[] {
@@ -493,6 +780,9 @@ function spouseifyTitle(t: string): string {
     '姨母': '姨父',
   };
   if (map[t]) return map[t];
+  // 哥哥 → 嫂子（siblingTitle 输出的是"哥哥/二哥"，不是"兄"）
+  if (t.endsWith('哥哥')) return '嫂子';
+  if (t.endsWith('哥')) return t.slice(0, -1) + '嫂';
   if (t.endsWith('兄')) return t.slice(0, -1) + '嫂';
   if (t.endsWith('弟')) return t.slice(0, -1) + '弟媳';
   if (t.endsWith('姐')) return t.slice(0, -1) + '姐夫';
@@ -591,7 +881,8 @@ export function getRelationshipText(
   perspectiveId: string | undefined,
   persons: Record<string, any>,
   order?: SiblingOrderMap,
-  seniority?: SeniorityMap
+  seniority?: SeniorityMap,
+  titleStyle?: TitleDialect
 ): string {
   if (!perspectiveId || !persons) return '';
   if (targetId === perspectiveId) return '主视角';
@@ -607,7 +898,8 @@ export function getRelationshipText(
   if (!path) return '家族成员';
 
   const title = kinshipTitle(path.steps, path.ids, persons, perspectiveId, order, seniority);
-  return title || '家族成员';
+  // 未设置时按北方习惯（与历史版本用词最接近：姑父/姨父/弟媳）
+  return localizeTitle(title || '家族成员', titleStyle || 'north');
 }
 
 // ==================== 关系路径 → 连线高亮辅助 ====================
