@@ -659,14 +659,18 @@ svg.links line.spouse { stroke: #b9ae99; stroke-width: 2; stroke-dasharray: none
   gap: 4px;
   padding: 8px 10px;
   cursor: default;
-  transition: box-shadow .18s, transform .18s, border-color .18s;
+  /* 只过渡"绘制型"属性（阴影/边框色）：transform 过渡会让被悬停的卡片提升为独立
+     合成层，进而使整块 #stage（带 will-change: transform 的大缩放图层）重新栅格化，
+     表现为悬停时全场文字一会儿清晰一会儿模糊。 */
+  transition: box-shadow .18s, border-color .18s;
 }
 .card.male { border-left: 4px solid oklch(60% 0.12 250); }
 .card.female { border-left: 4px solid oklch(65% 0.15 350); }
 .card:hover {
+  /* 悬停只改阴影/边框/层级，不做位移：位移会触发合成层提升与整层重栅格，
+     导致所有人物文字清晰度跳变（清晰↔模糊）。 */
   box-shadow: 0 5px 16px rgba(80,68,55,0.16);
   border-color: #cbbfa8;
-  transform: translateY(-2px);
   z-index: 5;
 }
 .card .name {
