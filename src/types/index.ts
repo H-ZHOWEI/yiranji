@@ -144,6 +144,13 @@ export interface FamilyMeta {
    */
   siblingOrder?: Record<string, number>;
   /**
+   * 同辈长幼手动标记：personId → 'elder'（长）/ 'younger'（幼）。
+   * 「同辈排序」面板里拖动只调整卡片位置；若某人实际长幼与位置不符（例如确实
+   * 年长但排在右边），可单独给他打上长/幼标记，称谓推导（兄/弟、姐/妹、伯/叔
+   * 等）会优先采用该标记，未标记的人仍按排序位次判断。
+   */
+  siblingSeniority?: Record<string, 'elder' | 'younger'>;
+  /**
    * 云同步标识：每个家谱一个稳定 ID，云端用它区分子目录。
    * 不随导入/另存改变，因此两台电脑能定位到同一份云端档案。
    */

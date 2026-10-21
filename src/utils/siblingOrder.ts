@@ -9,6 +9,9 @@ import type { Person } from '../types';
 /** personId → 组内位次（0 起） */
 export type SiblingOrderMap = Record<string, number>;
 
+/** personId → 长幼手动标记（长 / 幼）；仅用于称谓推导，不改变卡片左右位置 */
+export type SeniorityMap = Record<string, 'elder' | 'younger'>;
+
 /** 出生时间（毫秒）。无出生日期（"未知"）返回 Infinity —— 默认排在同辈最右 */
 export function birthTimeOf(person?: Person | null): number {
   if (!person?.birthDateSolar) return Number.POSITIVE_INFINITY;
@@ -58,8 +61,27 @@ export function areSiblings(a?: Person | null, b?: Person | null): boolean {
 /**
  * 同辈比较：同一组兄弟姐妹若已有手动位次，按位次；未指定位次的成员排在其后。
  * 跨组（堂表、无共同父母）时一律按出生日期。
+ *
+ * seniority 为「长幼手动标记」：标记为长的人排在标记为幼的人之前，未标记者居中。
+ * 该参数只传用于称谓推导的场合 —— 树布局不传，因此卡片左右位置仍只看位次。
  */
-export function compareSiblings(a: Person, b: Person, order?: SiblingOrderMap): number {
+export function compareSiblings(
+  a: Person,
+  b: Person,
+  order?: SiblingOrderMap,
+  seniority?: SeniorityMap
+): number {
+  // 长幼标记优先级最高：长(0) < 未标记(1) < 幼(2)，同级再走位次/生日
+  if (seniority) {
+    const sa = seniority[a.id];
+    const sb = seniority[b.id];
+    if ((sa || sb) && areSiblings(a, b)) {
+      const rank = (v?: 'elder' | 'younger') => (v === 'elder' ? 0 : v === 'younger' ? 2 : 1);
+      const ka = rank(sa);
+      const kb = rank(sb);
+      if (ka !== kb) return ka - kb;
+    }
+  }
   if (order) {
     const oa = order[a.id];
     const ob = order[b.id];
@@ -74,9 +96,13 @@ export function compareSiblings(a: Person, b: Person, order?: SiblingOrderMap): 
   return compareByAge(a, b);
 }
 
-/** 按当前生效规则（手动位次优先）排序一组人员，返回新数组 */
-export function sortSiblings<T extends Person>(list: T[], order?: SiblingOrderMap): T[] {
-  return [...list].sort((a, b) => compareSiblings(a, b, order));
+/** 按当前生效规则（长幼标记 > 手动位次 > 出生日期）排序一组人员，返回新数组 */
+export function sortSiblings<T extends Person>(
+  list: T[],
+  order?: SiblingOrderMap,
+  seniority?: SeniorityMap
+): T[] {
+  return [...list].sort((a, b) => compareSiblings(a, b, order, seniority));
 }
 
 /** 该组是否已有手动排序（任一人带位次） */

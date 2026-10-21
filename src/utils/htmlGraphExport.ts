@@ -383,7 +383,7 @@ export async function buildGraphHtml(
     const row: Record<string, string> = {};
     people.forEach((to, j) => {
       if (to.id === from.id) return;
-      const t = getRelationshipText(to.id, from.id, persons, project.meta.siblingOrder);
+      const t = getRelationshipText(to.id, from.id, persons, project.meta.siblingOrder, project.meta.siblingSeniority);
       if (t) row[String(j)] = t;
     });
     return row;
@@ -399,7 +399,7 @@ export async function buildGraphHtml(
     .map((box, index) => {
       const isSelf = !!perspectiveId && box.person.id === perspectiveId;
       const targetTitle = perspectiveId
-        ? getRelationshipText(box.person.id, perspectiveId, persons, project.meta.siblingOrder)
+        ? getRelationshipText(box.person.id, perspectiveId, persons, project.meta.siblingOrder, project.meta.siblingSeniority)
         : '';
       // 双向称谓：我叫他什么 / 他叫我什么
       const rel =
@@ -410,7 +410,7 @@ export async function buildGraphHtml(
             : '';
       const backTitle =
         perspectiveId && !isSelf
-          ? getRelationshipText(perspectiveId, box.person.id, persons, project.meta.siblingOrder)
+          ? getRelationshipText(perspectiveId, box.person.id, persons, project.meta.siblingOrder, project.meta.siblingSeniority)
           : '';
       const relBack = backTitle
         ? `${persons[perspectiveId!]?.gender === 'male' ? '他' : '她'}叫我：${backTitle}`

@@ -1,7 +1,7 @@
 // 家谱称谓推导与关系路径查找
 // 设计依据《推导算法》：数据层只存 生父母/养父母/继父母/配偶/子女，其余称谓全部由路径推导。
 
-import { compareSiblings, sortSiblings, type SiblingOrderMap } from './siblingOrder';
+import { compareSiblings, sortSiblings, type SiblingOrderMap, type SeniorityMap } from './siblingOrder';
 
 // ==================== 路径步进类型 ====================
 
@@ -189,8 +189,8 @@ export function findKinshipPath(
  * 优先使用家谱里手动指定的同辈顺序（用于"不知道生日但知道排行"的场景），
  * 没有手动顺序时按出生日期，出生日期未知的视为更年幼。
  */
-function olderThan(a: any, b: any, order?: SiblingOrderMap): boolean {
-  return compareSiblings(a, b, order) < 0;
+function olderThan(a: any, b: any, order?: SiblingOrderMap, seniority?: SeniorityMap): boolean {
+  return compareSiblings(a, b, order, seniority) < 0;
 }
 
 const CHINESE_RANK = ['大', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
@@ -212,7 +212,8 @@ function siblingTitle(
   targetId: string,
   selfId: string,
   persons: Record<string, any>,
-  order?: SiblingOrderMap
+  order?: SiblingOrderMap,
+  seniority?: SeniorityMap
 ): string {
   const me = persons[selfId];
   const target = persons[targetId];
@@ -228,7 +229,7 @@ function siblingTitle(
 
   const unique = Array.from(new Map(sibs.map((p: any) => [p.id, p])).values()) as any[];
   // 排行顺序 = 树上从左到右的顺序（手动排序优先，其次出生日期）
-  const sorted = sortSiblings(unique, order);
+  const sorted = sortSiblings(unique, order, seniority);
 
   const male = target.gender === 'male';
   if (unique.length <= 1) return male ? '独子' : '独女';
@@ -342,7 +343,8 @@ function collateralTitle(
   ids: string[],
   persons: Record<string, any>,
   selfId: string,
-  order?: SiblingOrderMap
+  order?: SiblingOrderMap,
+  seniority?: SeniorityMap
 ): string {
   const upCount = steps.findIndex((s) => DOWN_STEPS.has(s));
   const ups = steps.slice(0, upCount);
@@ -358,7 +360,7 @@ function collateralTitle(
 
   // 兄弟姐妹（含排行称呼）
   if (K === 1 && L === 1) {
-    return siblingTitle(ids[ids.length - 1], selfId, persons, order);
+    return siblingTitle(ids[ids.length - 1], selfId, persons, order, seniority);
   }
 
   const d = L - K;
@@ -381,7 +383,7 @@ function collateralTitle(
 
   // ---------- 同辈：堂/表兄弟姊妹 ----------
   if (d === 0) {
-    const older = olderThan(target, persons[selfId], order);
+    const older = olderThan(target, persons[selfId], order, seniority);
     const suffix = female ? (older ? '姐' : '妹') : older ? '兄' : '弟';
     return adoptPrefix + branchPrefix + suffix;
   }
@@ -394,7 +396,7 @@ function collateralTitle(
 
     let core: string;
     if (peerMale) {
-      core = female ? '姑' : olderThan(target, peer, order) ? '伯' : '叔';
+      core = female ? '姑' : olderThan(target, peer, order, seniority) ? '伯' : '叔';
     } else {
       core = female ? '姨' : '舅';
     }
@@ -434,7 +436,8 @@ function inLawFromSpouse(
   ids: string[],
   persons: Record<string, any>,
   selfId: string,
-  order?: SiblingOrderMap
+  order?: SiblingOrderMap,
+  seniority?: SeniorityMap
 ): string {
   const me = persons[selfId];
   const spouseId = ids[1];
@@ -462,7 +465,7 @@ function inLawFromSpouse(
   // 配偶的兄弟姐妹：大伯子/小叔子/大姑子/小姑子 或 大舅子/小舅子/大姨子/小姨子
   if (rest.length === 2 && (r0 === 'F' || r0 === 'M')) {
     const spouse = persons[spouseId];
-    const older = olderThan(target, spouse, order);
+    const older = olderThan(target, spouse, order, seniority);
     if (target?.gender === 'male') {
       return femaleSelf ? (older ? '大伯子' : '小叔子') : older ? '大舅子' : '小舅子';
     }
@@ -476,7 +479,7 @@ function inLawFromSpouse(
   }
 
   // 其余姻亲：套用配偶对该人的称呼（随配偶叫）
-  const spouseTitle = kinshipTitle(rest, restIds, persons, spouseId, order);
+  const spouseTitle = kinshipTitle(rest, restIds, persons, spouseId, order, seniority);
   return spouseTitle || '亲戚';
 }
 
@@ -515,7 +518,8 @@ export function kinshipTitle(
   ids: string[],
   persons: Record<string, any>,
   selfId: string,
-  order?: SiblingOrderMap
+  order?: SiblingOrderMap,
+  seniority?: SeniorityMap
 ): string {
   if (!steps.length) return '';
 
@@ -523,7 +527,7 @@ export function kinshipTitle(
 
   // 婚姻点在路径开头：配偶及其亲属
   if (mwIdx === 0) {
-    return inLawFromSpouse(steps, ids, persons, selfId, order);
+    return inLawFromSpouse(steps, ids, persons, selfId, order, seniority);
   }
 
   // 婚姻点在路径末尾：血亲的配偶（伯母/姑父/嫂子/儿媳/孙婿……）
@@ -542,12 +546,12 @@ export function kinshipTitle(
         return base + '媳';
       }
       // 兄弟姐妹的配偶：哥哥→嫂子、姐姐→姐夫……
-      const base = kinshipTitle(baseSteps, baseIds, persons, selfId, order);
+      const base = kinshipTitle(baseSteps, baseIds, persons, selfId, order, seniority);
       return base ? spouseifyTitle(base) : '亲戚';
     }
 
     // 长辈/平辈血亲的配偶：伯父→伯母、姑母→姑父……
-    const base = kinshipTitle(baseSteps, baseIds, persons, selfId, order);
+    const base = kinshipTitle(baseSteps, baseIds, persons, selfId, order, seniority);
     return base ? spouseifyTitle(base) : '亲戚';
   }
 
@@ -571,7 +575,7 @@ export function kinshipTitle(
   }
 
   // 向上 + 向下：旁系
-  return collateralTitle(steps, ids, persons, selfId, order);
+  return collateralTitle(steps, ids, persons, selfId, order, seniority);
 }
 
 // ==================== 对外主入口 ====================
@@ -579,13 +583,15 @@ export function kinshipTitle(
 /**
  * 计算目标人相对于主视角的称谓。
  * 与旧版签名保持一致，内部改为 BFS 路径推导 + 查表。
- * order 为家谱中手动指定的同辈顺序（meta.siblingOrder），不传则纯按出生日期判断长幼。
+ * order 为家谱中手动指定的同辈顺序（meta.siblingOrder），不传则纯按出生日期判断长幼；
+ * seniority 为手动长幼标记（meta.siblingSeniority），优先级高于 order。
  */
 export function getRelationshipText(
   targetId: string,
   perspectiveId: string | undefined,
   persons: Record<string, any>,
-  order?: SiblingOrderMap
+  order?: SiblingOrderMap,
+  seniority?: SeniorityMap
 ): string {
   if (!perspectiveId || !persons) return '';
   if (targetId === perspectiveId) return '主视角';
@@ -600,7 +606,7 @@ export function getRelationshipText(
   const path = findKinshipPath(targetId, perspectiveId, persons);
   if (!path) return '家族成员';
 
-  const title = kinshipTitle(path.steps, path.ids, persons, perspectiveId, order);
+  const title = kinshipTitle(path.steps, path.ids, persons, perspectiveId, order, seniority);
   return title || '家族成员';
 }
 

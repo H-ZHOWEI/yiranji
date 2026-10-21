@@ -234,6 +234,8 @@ interface FamilyStore {
   setDefaultPerspective: (id: string) => void;
   /** 更新同辈手动排序（personId → 组内位次），同时影响树布局与称谓推导 */
   setSiblingOrder: (order: Record<string, number>) => void;
+  /** 更新手动长幼标记（personId → 长/幼），只影响称谓推导，不改卡片位置 */
+  setSiblingSeniority: (seniority: Record<string, 'elder' | 'younger'>) => void;
 
   // 关系操作
   setRelation: (personId: string, relationType: string, targetId: string | null) => void;
@@ -1126,6 +1128,26 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
         meta: {
           ...project.meta,
           siblingOrder: { ...order },
+          updatedAt: new Date().toISOString(),
+        },
+      },
+      isDirty: true,
+    });
+    autoSave(get);
+  },
+
+  setSiblingSeniority: (seniority: Record<string, 'elder' | 'younger'>) => {
+    const { project } = get();
+    if (!project) return;
+
+    const next = { ...seniority };
+    set({
+      project: {
+        ...project,
+        meta: {
+          ...project.meta,
+          // 空对象时直接删除字段，避免档案里留下无意义的空表
+          siblingSeniority: Object.keys(next).length ? next : undefined,
           updatedAt: new Date().toISOString(),
         },
       },

@@ -821,6 +821,42 @@
   border-top: 1px solid var(--color-border-light);
 }
 
+/* 长幼手动标记：哥/姐（长）与 弟/妹（幼），只影响称呼，不改变卡片位置 */
+.sort-seniority {
+  flex: none;
+  display: flex;
+  gap: 3px;
+}
+
+.sort-sen-btn {
+  min-width: 24px;
+  height: 22px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  background-color: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background-color .15s;
+}
+
+.sort-sen-btn:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent-light);
+  background-color: var(--color-bg-hover);
+}
+
+.sort-sen-btn.active {
+  color: #fff;
+  background-color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 .sort-row-tag {
   margin-left: 6px;
   padding: 0 5px;

@@ -119,13 +119,14 @@ function PersonNode({ data }: { data: PersonNodeData }) {
     person.id,
     perspectiveId,
     personsMap,
-    project?.meta.siblingOrder
+    project?.meta.siblingOrder,
+    project?.meta.siblingSeniority
   );
   // 反向称谓：主视角该叫此人什么（用于"他叫我 X"）
   const isPerspectiveSelf = !!perspectiveId && person.id === perspectiveId;
   const reverseRelationText =
     !isPerspectiveSelf && perspectiveId
-      ? getRelationshipText(perspectiveId, person.id, personsMap, project?.meta.siblingOrder)
+      ? getRelationshipText(perspectiveId, person.id, personsMap, project?.meta.siblingOrder, project?.meta.siblingSeniority)
       : '';
   const selfPronoun = person.gender === 'male' ? '他' : '她';
   const perspectivePronoun =
@@ -518,6 +519,8 @@ interface SortRow {
   bornLabel: string;
   /** 与"按出生日期"的默认顺序是否不一致（用于提示该顺序为手动指定） */
   manual: boolean;
+  /** 手动长幼标记：elder=长、younger=幼；未标记为 undefined */
+  seniority?: 'elder' | 'younger';
 }
 
 // 坐标系轴线与原点绘制组件
@@ -575,7 +578,7 @@ function CoordinateAxes() {
 
 function TreePageContent() {
   const navigate = useNavigate();
-  const { project, getPersonsList, addPerson, setRelation, updatePerson, deletePerson, currentFilePath, currentProjectId, saveCustomLayout, clearCustomLayout, setDefaultPerspective, setSiblingOrder } = useFamilyStore();
+  const { project, getPersonsList, addPerson, setRelation, updatePerson, deletePerson, currentFilePath, currentProjectId, saveCustomLayout, clearCustomLayout, setDefaultPerspective, setSiblingOrder, setSiblingSeniority } = useFamilyStore();
   const persons = getPersonsList();
   // 用于一次性初始适应窗口 & 实时读取所有节点位置
   const { fitView, getNodes, setCenter, getViewport, setViewport } = useReactFlow();
@@ -1843,7 +1846,8 @@ function TreePageContent() {
           p.id,
           project?.meta.defaultPerspectiveId,
           project?.persons || {},
-          project?.meta.siblingOrder
+          project?.meta.siblingOrder,
+          project?.meta.siblingSeniority
         );
         return name.includes(pickerKeyword) || rel.includes(pickerKeyword);
       })
@@ -1853,6 +1857,8 @@ function TreePageContent() {
   // 手动顺序优先于出生日期：解决"不知道生日但知道排行"的场景；
   // 排序结果同时用于树布局与称谓推导，保证左右顺序与 兄/弟、姐/妹、伯/叔 一致。
   const siblingOrder: SiblingOrderMap | undefined = project?.meta.siblingOrder;
+  // 手动长幼标记（personId → 长/幼）：只影响称谓，不改卡片左右位置
+  const siblingSeniority = project?.meta.siblingSeniority;
 
   const sortAnchor = sortPersonId && project ? project.persons[sortPersonId] : undefined;
   const sortGroupMembers: Person[] = (() => {
@@ -1878,13 +1884,27 @@ function TreePageContent() {
               p.id,
               project?.meta.defaultPerspectiveId,
               project?.persons || {},
-              siblingOrder
+              siblingOrder,
+              siblingSeniority
             ),
+      seniority: siblingSeniority?.[p.id],
       bornLabel: p.birthDateSolar ? p.birthDateSolar.slice(0, 10) : '出生日期未知',
       manual: defaultIds.indexOf(p.id) !== index,
     }));
   })();
   const sortIsManual = hasManualOrder(sortGroupMembers, siblingOrder);
+
+  // 切换某人的长幼标记：再点一次同一个标记即取消（回到按排序位次判断）
+  const toggleSiblingSeniority = (personId: string, mark: 'elder' | 'younger') => {
+    if (!project) return;
+    const next: Record<string, 'elder' | 'younger'> = { ...(project.meta.siblingSeniority || {}) };
+    if (next[personId] === mark) {
+      delete next[personId];
+    } else {
+      next[personId] = mark;
+    }
+    setSiblingSeniority(next);
+  };
 
   const moveInSiblingGroup = (personId: string, delta: number) => {
     if (!project) return;
@@ -2162,7 +2182,8 @@ function TreePageContent() {
                       p.id,
                       project?.meta.defaultPerspectiveId,
                       project?.persons || {},
-                      project?.meta.siblingOrder
+                      project?.meta.siblingOrder,
+                      project?.meta.siblingSeniority
                     );
                 return (
                   <button
@@ -2196,9 +2217,10 @@ function TreePageContent() {
               <div>
                 <div className="perspective-picker-title">同辈排序</div>
                 <div className="perspective-picker-sub">
-                  左侧为年长、右侧为年幼，点行尾的 ← → 调整位置。
-                  即使出生日期未知也可以指定排行，修改立即生效并随档案保存；
+                  左侧为年长、右侧为年幼，点行尾的 ← → 调整位置，修改立即生效并随档案保存；
                   顺序会同时决定卡片位置与「兄/弟、姐/妹、伯/叔」等称呼。
+                  若某人实际长幼与位置不符，可用行内的「哥/姐」「弟/妹」按钮单独标记长幼——
+                  标记只修正称呼，不改变卡片位置。
                 </div>
               </div>
               <button
@@ -2247,6 +2269,24 @@ function TreePageContent() {
                           <span className="sort-born">{row.bornLabel}</span>
                         </span>
                         <span className="perspective-picker-rel">{row.relation}</span>
+                        <span className="sort-seniority" title="手动指定长幼：只修正称呼，不改变卡片位置">
+                          <button
+                            type="button"
+                            className={`sort-sen-btn ${row.seniority === 'elder' ? 'active' : ''}`}
+                            onClick={() => toggleSiblingSeniority(row.person.id, 'elder')}
+                            title={`标记为${row.person.gender === 'female' ? '姐姐' : '哥哥'}（长）`}
+                          >
+                            {row.person.gender === 'female' ? '姐' : '哥'}
+                          </button>
+                          <button
+                            type="button"
+                            className={`sort-sen-btn ${row.seniority === 'younger' ? 'active' : ''}`}
+                            onClick={() => toggleSiblingSeniority(row.person.id, 'younger')}
+                            title={`标记为${row.person.gender === 'female' ? '妹妹' : '弟弟'}（幼）`}
+                          >
+                            {row.person.gender === 'female' ? '妹' : '弟'}
+                          </button>
+                        </span>
                         <span className="sort-actions">
                           <button
                             className="sort-move-btn"
@@ -2277,6 +2317,14 @@ function TreePageContent() {
                     title="清除手动顺序，恢复按出生日期排序"
                   >
                     按出生日期重排
+                  </button>
+                  <button
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => setSiblingSeniority({})}
+                    disabled={!siblingSeniority || Object.keys(siblingSeniority).length === 0}
+                    title="清除全部手动长幼标记，恢复按排序位次判断长幼"
+                  >
+                    清除长幼标记
                   </button>
                   <button className="btn btn-sm btn-primary" onClick={() => setSortPersonId(null)}>
                     完成
