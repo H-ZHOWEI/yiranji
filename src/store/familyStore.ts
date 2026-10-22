@@ -1118,8 +1118,10 @@ export const useFamilyStore = create<FamilyStore>((set, get) => ({
           updatedAt: new Date().toISOString(),
         },
       },
-      isDirty: true,
+      isDirty: false,
     });
+    // 主视角必须立即持久化，否则重启后会回到上一次保存的人
+    autoSave(get);
   },
 
   setSiblingOrder: (order: Record<string, number>) => {
